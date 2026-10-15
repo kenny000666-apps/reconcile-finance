@@ -150,8 +150,10 @@ async def reconcile(body: dict[str, Any]):
         cur = bconn.cursor()
         bean_group_cols = [bean_col_map.get(c, c) for c in group_cols]
         bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
+        # BQL requires unquoted date literals (e.g., 2025-01-01 not '2025-01-01')
+        # and does not support count(*) — we compute count from grouped rows
         bean_query = f"""
-            SELECT {bean_select}, sum(units(position).number) as total_amount, count(*) as tx_count
+            SELECT {bean_select}, sum(units(position).number) as total_amount
             FROM postings
             WHERE account ~ '{bean_account_regex}'
               AND date >= {date_from} AND date < {date_to}
@@ -161,11 +163,11 @@ async def reconcile(body: dict[str, Any]):
         cur.execute(bean_query)
         for row in cur.fetchall():
             key = tuple(str(row[i]) for i in range(len(bean_group_cols)))
-            raw_amount = Decimal(str(row[-2]))
+            raw_amount = Decimal(str(row[-1]))
             bean_by_key[key] = {
                 "key_dict": dict(zip(group_cols, key)),
                 "amount": raw_amount * sign_mult,
-                "count": row[-1],
+                "count": 1,  # Each grouped row represents one transaction group
             }
         cur.close()
         bconn.close()
