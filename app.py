@@ -95,45 +95,61 @@ async def reconcile(body: dict[str, Any]):
         return {"error": f"No mapping for PG account: {pg_account}"}
     bean_account_regex, sign_mult = mapping
 
-    # Query PG
-    pg_rows = {}
+    # Column mappings
+    col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
+               "payee": "payee", "description": "description", "category": "category"}
+    bean_col_map = {"date": "date", "payee": "payee", "description": "narration", "account": "account"}
+
+    # Grouping columns exclude 'amount' — amount is a comparison value, not a key dimension
+    group_cols = [c for c in columns if c != "amount"]
+    if not group_cols:
+        group_cols = ["date"]
+
+    # Phase 1: Query PG with external_id for primary matching
+    pg_by_extid = {}   # external_id -> row data
+    pg_by_key = {}     # composite key -> row data (fallback)
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        # Map frontend column names to actual PG column names
-        col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount", "payee": "payee", "description": "description", "category": "category"}
-        mapped_cols = [col_map.get(c, c) for c in columns]
-        select_cols = ", ".join(mapped_cols)
+        mapped_group_cols = [col_map.get(c, c) for c in group_cols]
+        select_parts = list(mapped_group_cols) + ["SUM(amount) as total_amount", "COUNT(*) as tx_count", "array_agg(external_id) as ext_ids"]
+        select_clause = ", ".join(select_parts)
+        group_clause = ", ".join(mapped_group_cols)
         query = f"""
-            SELECT {select_cols}, SUM(amount) as total_amount, COUNT(*) as tx_count
+            SELECT {select_clause}
             FROM transactions
             WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
-            GROUP BY {select_cols}
-            ORDER BY {select_cols}
+            GROUP BY {group_clause}
+            ORDER BY {group_clause}
         """
         cur.execute(query, (pg_account, date_from, date_to))
         for row in cur.fetchall():
-            key = tuple(str(row[col_map.get(c, c)]) for c in columns)
-            pg_rows[key] = {
-                "amount": Decimal(str(row["total_amount"])),
+            key = tuple(str(row[col_map.get(c, c)]) for c in group_cols)
+            amount = Decimal(str(row["total_amount"]))
+            entry = {
+                "key_dict": dict(zip(group_cols, key)),
+                "amount": amount,
                 "count": row["tx_count"],
-                "source": "pg",
+                "ext_ids": row["ext_ids"] or [],
             }
+            # Index by first non-null external_id for primary matching
+            for eid in (row["ext_ids"] or []):
+                if eid:
+                    pg_by_extid[str(eid)] = entry
+                    break
+            pg_by_key[key] = entry
         cur.close()
         conn.close()
     except Exception as e:
         return {"error": f"PG query failed: {e}", "results": []}
 
-    # Query Bean
-    bean_rows = {}
+    # Phase 2: Query Bean
+    bean_by_key = {}
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
-        # Map frontend column names to BQL equivalents; 'amount' is computed, not a column
-        bean_col_map = {"date": "date", "payee": "payee", "description": "narration", "account": "account"}
-        bean_group_cols = [bean_col_map.get(c, c) for c in columns if c != "amount"]
+        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols]
         bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
-        # Build equivalent BQL
         bean_query = f"""
             SELECT {bean_select}, sum(units(position).number) as total_amount, count(*) as tx_count
             FROM postings
@@ -144,30 +160,38 @@ async def reconcile(body: dict[str, Any]):
         """
         cur.execute(bean_query)
         for row in cur.fetchall():
-            # Key uses only the group columns (excludes amount/count)
             key = tuple(str(row[i]) for i in range(len(bean_group_cols)))
             raw_amount = Decimal(str(row[-2]))
-            bean_rows[key] = {
+            bean_by_key[key] = {
+                "key_dict": dict(zip(group_cols, key)),
                 "amount": raw_amount * sign_mult,
                 "count": row[-1],
-                "source": "bean",
             }
         cur.close()
         bconn.close()
     except Exception as e:
         return {"error": f"Bean query failed: {e}", "results": []}
 
-    # Compare
-    all_keys = set(pg_rows.keys()) | set(bean_rows.keys())
+    # Phase 3: Two-pass matching
+    matched_pg_keys = set()
+    matched_bean_keys = set()
     results = []
+
+    # Pass A: Match by external_id (if PG has ext_ids that map to bean keys)
+    # For now, external_id matching is reserved for when bean side also carries IDs.
+    # Since beanquery doesn't easily expose metadata in GROUP BY, we skip to Pass B.
+
+    # Pass B: Match by composite key (group columns only, no amount in key)
+    all_keys = set(pg_by_key.keys()) | set(bean_by_key.keys())
     for key in sorted(all_keys):
-        pg = pg_rows.get(key)
-        bean = bean_rows.get(key)
+        pg = pg_by_key.get(key)
+        bean = bean_by_key.get(key)
+        key_dict = (pg or bean)["key_dict"]
         if pg and bean:
             diff = pg["amount"] - bean["amount"]
             status = "MATCH" if diff == 0 else "MISMATCH"
             results.append({
-                "key": dict(zip(columns, key)),
+                "key": key_dict,
                 "pg_amount": str(pg["amount"]),
                 "bean_amount": str(bean["amount"]),
                 "diff": str(diff),
@@ -175,9 +199,11 @@ async def reconcile(body: dict[str, Any]):
                 "bean_count": bean["count"],
                 "status": status,
             })
+            matched_pg_keys.add(key)
+            matched_bean_keys.add(key)
         elif pg:
             results.append({
-                "key": dict(zip(columns, key)),
+                "key": key_dict,
                 "pg_amount": str(pg["amount"]),
                 "bean_amount": None,
                 "diff": str(pg["amount"]),
@@ -187,7 +213,7 @@ async def reconcile(body: dict[str, Any]):
             })
         else:
             results.append({
-                "key": dict(zip(columns, key)),
+                "key": key_dict,
                 "pg_amount": None,
                 "bean_amount": str(bean["amount"]),
                 "diff": str(-bean["amount"]),
