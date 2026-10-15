@@ -397,7 +397,7 @@ async def import_bean_only(body: dict[str, Any]):
                         payee,
                         description,
                         category,
-                        {"source": "bean_import", "bean_account": bean_account},
+                        psycopg2.extras.Json({"source": "bean_import", "bean_account": bean_account}),
                     ),
                 )
                 if cur.rowcount > 0:
