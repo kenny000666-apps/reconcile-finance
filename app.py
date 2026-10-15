@@ -56,8 +56,8 @@ async def get_accounts():
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT account FROM transactions ORDER BY account")
-        pg_accounts = [row["account"] for row in cur.fetchall()]
+        cur.execute("SELECT DISTINCT account_name FROM transactions ORDER BY account_name")
+        pg_accounts = [row["account_name"] for row in cur.fetchall()]
         cur.close()
         conn.close()
     except Exception as e:
@@ -99,17 +99,20 @@ async def reconcile(body: dict[str, Any]):
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        select_cols = ", ".join(columns)
+        # Map frontend column names to actual PG column names
+        col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount", "payee": "payee", "description": "description", "category": "category"}
+        mapped_cols = [col_map.get(c, c) for c in columns]
+        select_cols = ", ".join(mapped_cols)
         query = f"""
             SELECT {select_cols}, SUM(amount) as total_amount, COUNT(*) as tx_count
             FROM transactions
-            WHERE account = %s AND date >= %s AND date < %s
+            WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
             GROUP BY {select_cols}
             ORDER BY {select_cols}
         """
         cur.execute(query, (pg_account, date_from, date_to))
         for row in cur.fetchall():
-            key = tuple(str(row[c]) for c in columns)
+            key = tuple(str(row[col_map.get(c, c)]) for c in columns)
             pg_rows[key] = {
                 "amount": Decimal(str(row["total_amount"])),
                 "count": row["tx_count"],
