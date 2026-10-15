@@ -15,7 +15,7 @@ import psycopg2.extras
 app = FastAPI(title="Reconcile Finance")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-BEAN_PATH = os.environ.get("BEAN_PATH", "/data/beancount/main.bean")
+BEAN_PATH = os.environ.get("BEAN_PATH", "/data/main.bean")
 PG_HOST = os.environ.get("PG_HOST", "postgres.datastores.svc.cluster.local")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB", "finance")
@@ -24,10 +24,11 @@ PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 
 # Account mapping: PG account name -> (bean account regex, sign multiplier)
 ACCOUNT_MAP = {
-    "BarclaysPersonal": ("Liabilities:CreditCard:Barclays", -1),
-    "BarclaysBusiness": ("Liabilities:CreditCard:BarclaysBusiness", -1),
-    "AmexPlatinum": ("Liabilities:CreditCard:AmexPlatinum", -1),
-    "ChaseSapphire": ("Liabilities:CreditCard:ChaseSapphire", -1),
+    "AmericanExpress": ("Liabilities:CreditCard:AmericanExpress", -1),
+    "BarclaysPersonal": ("Liabilities:CreditCard:BarclaysPersonal", -1),
+    "HalifaxPersonal": ("Liabilities:CreditCard:HalifaxPersonal", -1),
+    "Revolut": ("Assets:Current:Revolut", 1),
+    "ZopaBank": ("Assets:Current:ZopaBank", 1),
     "Discover": ("Liabilities:CreditCard:Discover", -1),
 }
 
