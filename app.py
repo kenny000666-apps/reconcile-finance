@@ -233,6 +233,7 @@ async def reconcile(body: dict[str, Any]):
     # Phase 3: Two-pass matching
     matched_pg_keys = set()
     matched_bean_keys = set()
+    matched_bean_extids = set()  # Track external_ids consumed in Pass A
     results = []
 
     # Pass A: Match by external_id (primary — most reliable)
@@ -257,12 +258,19 @@ async def reconcile(body: dict[str, Any]):
             bean_key = tuple(bean_entry["key_dict"].get(c) for c in group_cols)
             matched_pg_keys.add(pg_key)
             matched_bean_keys.add(bean_key)
+            matched_bean_extids.add(eid)  # Track consumed external_id
 
     # Pass B: Match by composite key (fallback — skip keys already matched in Pass A)
     all_keys = set(pg_by_key.keys()) | set(bean_by_key.keys())
     for key in sorted(all_keys):
         if key in matched_pg_keys or key in matched_bean_keys:
             continue
+        # Skip bean entries whose external_id was already matched in Pass A
+        bean_entry = bean_by_key.get(key)
+        if bean_entry:
+            bean_eid = bean_entry["key_dict"].get("external_id")
+            if bean_eid and bean_eid in matched_bean_extids:
+                continue
         pg = pg_by_key.get(key)
         bean = bean_by_key.get(key)
         key_dict = (pg or bean)["key_dict"]
