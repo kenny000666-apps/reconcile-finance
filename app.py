@@ -207,13 +207,19 @@ async def reconcile(body: dict[str, Any]):
             if key in bean_by_key:
                 bean_by_key[key]["amount"] += signed_amount
                 bean_by_key[key]["count"] += 1
+                # Update external_id if current one is empty and this posting has one
+                if ext_id and not bean_by_key[key]["key_dict"].get("external_id"):
+                    bean_by_key[key]["key_dict"]["external_id"] = str(ext_id)
             else:
                 bean_cols_in_key = [c for c in group_cols if c not in pg_only_cols]
                 kd = dict(zip(bean_cols_in_key, key))
-                # Inject PG-only columns as empty so keys align with PG entries
+                # Inject PG-only columns — use actual external_id if available
                 for pg_col in pg_only_cols:
                     if pg_col in group_cols:
-                        kd[pg_col] = ""
+                        if pg_col == "external_id" and ext_id:
+                            kd[pg_col] = str(ext_id)
+                        else:
+                            kd[pg_col] = ""
                 bean_by_key[key] = {
                     "key_dict": kd,
                     "amount": signed_amount,
