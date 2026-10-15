@@ -206,10 +206,11 @@ async def reconcile(body: dict[str, Any]):
     results = []
 
     # Pass A: Match by external_id (primary — most reliable)
+    # Use absolute value comparison since PG and Bean may have different sign conventions
     for eid, pg_entry in pg_by_extid.items():
         bean_entry = bean_by_extid.get(eid)
         if bean_entry:
-            diff = pg_entry["amount"] - bean_entry["amount"]
+            diff = abs(pg_entry["amount"]) - abs(bean_entry["amount"])
             status = "MATCH" if abs(diff) <= tolerance else "MISMATCH"
             results.append({
                 "key": pg_entry["key_dict"],
