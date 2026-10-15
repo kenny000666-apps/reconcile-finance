@@ -101,7 +101,7 @@ async def reconcile(body: dict[str, Any]):
     # Column mappings
     col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
                "payee": "payee", "description": "description", "category": "category"}
-    bean_col_map = {"date": "date", "payee": "payee", "description": "narration", "account": "account"}
+    bean_col_map = {"date": "date", "transaction_date": "date", "payee": "payee", "description": "narration", "account": "account", "account_name": "account"}
 
     # Grouping columns exclude 'amount' — amount is a comparison value, not a key dimension
     group_cols = [c for c in columns if c != "amount"]
