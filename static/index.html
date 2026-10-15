@@ -42,6 +42,9 @@
   .error { background: #fce8e6; color: #d93025; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
   .export-btn { background: #0d904f; }
   .export-btn:hover { background: #0a7a42; }
+  .import-checkbox { width: 18px; height: 18px; cursor: pointer; accent-color: #6f42c1; }
+  th.import-col { width: 40px; text-align: center; }
+  td.import-col { text-align: center; }
 </style>
 </head>
 <body>
@@ -170,7 +173,11 @@ function renderResults(data) {
 
   // Build dynamic columns based on what was selected
   const cols = lastParams ? lastParams.columns : ['date','payee','amount'];
+  const hasBeanOnly = data.results.some(r => r.status === 'BEAN_ONLY');
   let hdrCols = '<th>Status</th>';
+  if (hasBeanOnly) {
+    hdrCols += '<th class="import-col"><input type="checkbox" class="import-checkbox" id="selectAllImport" onchange="toggleAllImport(this)"></th>';
+  }
   for (const c of cols) {
     if (c === 'amount') continue; // amount shown as PG/Bean/Diff
     const label = c === 'external_id' ? 'Ext ID' : c.charAt(0).toUpperCase() + c.slice(1);
@@ -178,10 +185,18 @@ function renderResults(data) {
   }
   hdrCols += '<th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th>';
   let html = `<table><thead><tr>${hdrCols}</tr></thead><tbody>`;
-  for (const r of data.results) {
+  for (let i = 0; i < data.results.length; i++) {
+    const r = data.results[i];
     const k = r.key;
     html += `<tr class="${r.status}">`;
     html += `<td><span class="status-badge">${r.status}</span></td>`;
+    if (hasBeanOnly) {
+      if (r.status === 'BEAN_ONLY') {
+        html += `<td class="import-col"><input type="checkbox" class="import-checkbox import-row-cb" data-idx="${i}" checked></td>`;
+      } else {
+        html += '<td class="import-col"></td>';
+      }
+    }
     for (const c of cols) {
       if (c === 'amount') continue;
       const val = k[c] || k.narration || '';
@@ -200,14 +215,24 @@ function renderResults(data) {
 
 let lastResults = null;
 
+function toggleAllImport(masterCb) {
+  document.querySelectorAll('.import-row-cb').forEach(cb => { cb.checked = masterCb.checked; });
+}
+
 async function importBeanOnly() {
   if (!lastResults || !lastParams) return;
-  const beanOnly = lastResults.filter(r => r.status === 'BEAN_ONLY');
+  // Only import checked BEAN_ONLY rows
+  const checkedIdxs = new Set(
+    Array.from(document.querySelectorAll('.import-row-cb:checked')).map(cb => parseInt(cb.dataset.idx))
+  );
+  const beanOnly = lastResults
+    .map((r, i) => ({ ...r, _idx: i }))
+    .filter(r => r.status === 'BEAN_ONLY' && checkedIdxs.has(r._idx));
   if (beanOnly.length === 0) {
-    alert('No BEAN_ONLY records to import.');
+    alert('No BEAN_ONLY records selected for import.');
     return;
   }
-  if (!confirm(`Import ${beanOnly.length} BEAN_ONLY record(s) into PG?`)) return;
+  if (!confirm(`Import ${beanOnly.length} selected BEAN_ONLY record(s) into PG?`)) return;
 
   const btn = document.getElementById('importBtn');
   btn.disabled = true; btn.textContent = 'Importing...';
