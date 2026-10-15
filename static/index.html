@@ -49,7 +49,36 @@
   .filter-bar label { font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; margin-right: 4px; }
   .filter-bar select { padding: 6px 10px; font-size: 13px; }
   .filter-bar .result-count { font-size: 13px; color: #666; margin-left: auto; }
-  /* Mobile responsive */
+  /* Mobile card layout */
+  .mobile-cards { display: none; }
+  .m-card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-bottom: 10px; overflow: hidden; cursor: pointer; transition: box-shadow 0.15s; }
+  .m-card:active { box-shadow: 0 1px 6px rgba(0,0,0,0.2); }
+  .m-card.MATCH { border-left: 4px solid #0d904f; }
+  .m-card.MISMATCH { border-left: 4px solid #e37400; }
+  .m-card.PG_ONLY { border-left: 4px solid #d93025; }
+  .m-card.BEAN_ONLY { border-left: 4px solid #1a73e8; }
+  .m-card-header { padding: 12px 14px; display: flex; align-items: center; gap: 10px; }
+  .m-card-header .status-badge { flex-shrink: 0; }
+  .m-card-info { flex: 1; min-width: 0; }
+  .m-card-date { font-size: 12px; color: #666; }
+  .m-card-payee { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .m-card-amounts { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0; }
+  .m-card-amt { font-size: 13px; font-weight: 600; }
+  .m-card-amt.pg { color: #1a73e8; }
+  .m-card-amt.bean { color: #6f42c1; }
+  .m-card-expand-icon { font-size: 12px; color: #999; transition: transform 0.2s; flex-shrink: 0; }
+  .m-card.expanded .m-card-expand-icon { transform: rotate(180deg); }
+  .m-card-details { display: none; padding: 0 14px 14px; border-top: 1px solid #eee; }
+  .m-card.expanded .m-card-details { display: block; }
+  .m-detail-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; border-bottom: 1px solid #f5f5f5; }
+  .m-detail-row:last-child { border-bottom: none; }
+  .m-detail-label { color: #666; font-weight: 500; }
+  .m-detail-value { font-weight: 600; text-align: right; max-width: 60%; word-break: break-word; }
+  .m-detail-value.diff-pos { color: #d93025; }
+  .m-detail-value.diff-neg { color: #0d904f; }
+  .m-detail-value.diff-zero { color: #666; }
+  .m-import-row { padding: 10px 14px; border-top: 1px solid #eee; display: flex; align-items: center; gap: 8px; }
+  .m-import-row label { font-size: 13px; text-transform: none; font-weight: normal; }
   @media (max-width: 768px) {
     body { padding: 10px; }
     h1 { font-size: 20px; margin-bottom: 12px; }
@@ -64,9 +93,9 @@
     .stat .label { font-size: 10px; }
     .filter-bar { padding: 10px 12px; gap: 8px; }
     .filter-bar .result-count { width: 100%; margin-left: 0; margin-top: 4px; }
-    table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
-    th, td { padding: 8px 10px; font-size: 12px; }
-    .status-badge { font-size: 10px; padding: 2px 6px; }
+    /* Hide table, show cards on mobile */
+    table { display: none !important; }
+    .mobile-cards { display: block; }
   }
   @media (max-width: 480px) {
     .stat { flex: 1 1 calc(50% - 8px); }
@@ -234,9 +263,11 @@ function renderTable(results, data) {
     return;
   }
 
-  // Build dynamic columns based on what was selected
   const cols = lastParams ? lastParams.columns : ['date','payee','amount'];
   const hasBeanOnly = data.results.some(r => r.status === 'BEAN_ONLY');
+  const expandedIds = getExpandedIds();
+
+  // === Desktop table ===
   let hdrCols = '<th>Status</th>';
   if (hasBeanOnly) {
     hdrCols += '<th class="import-col"><input type="checkbox" class="import-checkbox" id="selectAllImport" onchange="toggleAllImport(this)"></th>';
@@ -247,39 +278,105 @@ function renderTable(results, data) {
     hdrCols += `<th>${label}</th>`;
   }
   hdrCols += '<th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th>';
-  let html = `<table><thead><tr>${hdrCols}</tr></thead><tbody>`;
+  let tableHtml = `<table><thead><tr>${hdrCols}</tr></thead><tbody>`;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     const k = r.key;
-    // Find original index for import checkbox data-idx
     const origIdx = data.results.indexOf(r);
-    html += `<tr class="${r.status}">`;
-    html += `<td><span class="status-badge">${r.status}</span></td>`;
+    tableHtml += `<tr class="${r.status}">`;
+    tableHtml += `<td><span class="status-badge">${r.status}</span></td>`;
     if (hasBeanOnly) {
       if (r.status === 'BEAN_ONLY') {
-        html += `<td class="import-col"><input type="checkbox" class="import-checkbox import-row-cb" data-idx="${origIdx}" checked></td>`;
+        tableHtml += `<td class="import-col"><input type="checkbox" class="import-checkbox import-row-cb" data-idx="${origIdx}" checked></td>`;
       } else {
-        html += '<td class="import-col"></td>';
+        tableHtml += '<td class="import-col"></td>';
       }
     }
     for (const c of cols) {
       if (c === 'amount') continue;
       const val = k[c] || k.narration || '';
-      html += `<td title="${val}">${val || ''}</td>`;
+      tableHtml += `<td title="${val}">${val || ''}</td>`;
     }
-    html += `<td>${r.pg_amount ?? '—'}</td>`;
-    html += `<td>${r.bean_amount ?? '—'}</td>`;
-    html += `<td>${r.diff}</td>`;
-    html += `<td>${r.pg_count}</td>`;
-    html += `<td>${r.bean_count}</td>`;
-    html += '</tr>';
+    tableHtml += `<td>${r.pg_amount ?? '—'}</td>`;
+    tableHtml += `<td>${r.bean_amount ?? '—'}</td>`;
+    tableHtml += `<td>${r.diff}</td>`;
+    tableHtml += `<td>${r.pg_count}</td>`;
+    tableHtml += `<td>${r.bean_count}</td>`;
+    tableHtml += '</tr>';
   }
-  html += '</tbody></table>';
-  document.getElementById('resultsArea').innerHTML = html;
+  tableHtml += '</tbody></table>';
+
+  // === Mobile cards ===
+  let cardsHtml = '<div class="mobile-cards">';
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const k = r.key;
+    const origIdx = data.results.indexOf(r);
+    const rowId = makeRowId(r);
+    const isExpanded = expandedIds.has(rowId);
+    const dateVal = k.date || '';
+    const payeeVal = k.payee || k.narration || '';
+    const pgAmt = r.pg_amount ?? '—';
+    const beanAmt = r.bean_amount ?? '—';
+    const diffVal = r.diff ?? '0';
+    const diffClass = diffVal === '0' || diffVal === '0.00' ? 'diff-zero' : (parseFloat(diffVal) > 0 ? 'diff-pos' : 'diff-neg');
+
+    cardsHtml += `<div class="m-card ${r.status}${isExpanded ? ' expanded' : ''}" data-row-id="${rowId}" onclick="toggleCardExpand(this,'${rowId.replace(/'/g,"\\'")}')">`;
+    cardsHtml += `<div class="m-card-header">`;
+    cardsHtml += `<span class="status-badge">${r.status}</span>`;
+    cardsHtml += `<div class="m-card-info"><div class="m-card-date">${dateVal}</div><div class="m-card-payee">${payeeVal}</div></div>`;
+    cardsHtml += `<div class="m-card-amounts">`;
+    if (pgAmt !== '—') cardsHtml += `<span class="m-card-amt pg">PG: ${pgAmt}</span>`;
+    if (beanAmt !== '—') cardsHtml += `<span class="m-card-amt bean">Bean: ${beanAmt}</span>`;
+    cardsHtml += `</div>`;
+    cardsHtml += `<span class="m-card-expand-icon">▼</span>`;
+    cardsHtml += `</div>`;
+    // Expandable details
+    cardsHtml += `<div class="m-card-details">`;
+    cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Difference</span><span class="m-detail-value ${diffClass}">${diffVal}</span></div>`;
+    cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">PG Count</span><span class="m-detail-value">${r.pg_count}</span></div>`;
+    cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Bean Count</span><span class="m-detail-value">${r.bean_count}</span></div>`;
+    if (k.category) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Category</span><span class="m-detail-value">${k.category}</span></div>`;
+    if (k.external_id) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">External ID</span><span class="m-detail-value">${k.external_id}</span></div>`;
+    cardsHtml += `</div>`;
+    // Import checkbox for BEAN_ONLY (stop propagation so card doesn't toggle)
+    if (hasBeanOnly && r.status === 'BEAN_ONLY') {
+      cardsHtml += `<div class="m-import-row" onclick="event.stopPropagation()"><input type="checkbox" class="import-checkbox import-row-cb" data-idx="${origIdx}" checked id="m-import-${origIdx}"><label for="m-import-${origIdx}">Select for import</label></div>`;
+    }
+    cardsHtml += `</div>`;
+  }
+  cardsHtml += '</div>';
+
+  document.getElementById('resultsArea').innerHTML = tableHtml + cardsHtml;
 }
 
 let lastResults = null;
 let lastRenderedData = null;
+
+// Expanded row persistence via localStorage
+const EXPAND_STORAGE_KEY = 'reconcile_expanded_ids';
+function getExpandedIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(EXPAND_STORAGE_KEY) || '[]')); } catch(e) { return new Set(); }
+}
+function saveExpandedIds(ids) {
+  try { localStorage.setItem(EXPAND_STORAGE_KEY, JSON.stringify([...ids])); } catch(e) {}
+}
+function makeRowId(r) {
+  // Create a stable ID from key fields for expansion persistence
+  const k = r.key || {};
+  return `${k.date||''}|${k.payee||k.narration||''}|${r.pg_amount||''}|${r.bean_amount||''}`;
+}
+function toggleCardExpand(cardEl, rowId) {
+  const expanded = getExpandedIds();
+  if (expanded.has(rowId)) {
+    expanded.delete(rowId);
+    cardEl.classList.remove('expanded');
+  } else {
+    expanded.add(rowId);
+    cardEl.classList.add('expanded');
+  }
+  saveExpandedIds(expanded);
+}
 
 function applyStatusFilter() {
   if (!lastRenderedData) return;
