@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PG vs Beancount Reconciliation</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+  h1 { margin-bottom: 20px; color: #1a1a2e; }
+  .controls { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap; align-items: end; }
+  .control-group { display: flex; flex-direction: column; gap: 4px; }
+  label { font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; }
+  input, select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+  button { padding: 8px 20px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; }
+  button:hover { background: #1557b0; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  .checkbox-group { display: flex; gap: 12px; align-items: center; }
+  .checkbox-group label { text-transform: none; font-weight: normal; font-size: 14px; display: flex; align-items: center; gap: 4px; }
+  .summary { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat { background: #fff; padding: 15px 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); min-width: 120px; text-align: center; }
+  .stat .value { font-size: 28px; font-weight: 700; }
+  .stat .label { font-size: 12px; color: #666; margin-top: 4px; }
+  .stat.match .value { color: #0d904f; }
+  .stat.mismatch .value { color: #e37400; }
+  .stat.pg-only .value { color: #d93025; }
+  .stat.bean-only .value { color: #1a73e8; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+  th { background: #f8f9fa; padding: 12px 15px; text-align: left; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #eee; }
+  td { padding: 10px 15px; border-bottom: 1px solid #eee; font-size: 14px; }
+  tr:last-child td { border-bottom: none; }
+  tr.MATCH { background: #e6f4ea; }
+  tr.MISMATCH { background: #fef7e0; }
+  tr.PG_ONLY { background: #fce8e6; }
+  tr.BEAN_ONLY { background: #e8f0fe; }
+  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .MATCH .status-badge { background: #0d904f; color: #fff; }
+  .MISMATCH .status-badge { background: #e37400; color: #fff; }
+  .PG_ONLY .status-badge { background: #d93025; color: #fff; }
+  .BEAN_ONLY .status-badge { background: #1a73e8; color: #fff; }
+  .loading { text-align: center; padding: 40px; color: #666; }
+  .error { background: #fce8e6; color: #d93025; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+  .export-btn { background: #0d904f; }
+  .export-btn:hover { background: #0a7a42; }
+</style>
+</head>
+<body>
+<h1>📊 PG vs Beancount Reconciliation</h1>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Date From</label>
+    <input type="date" id="dateFrom" value="2025-01-01">
+  </div>
+  <div class="control-group">
+    <label>Date To</label>
+    <input type="date" id="dateTo" value="2025-01-31">
+  </div>
+  <div class="control-group">
+    <label>PG Account</label>
+    <select id="pgAccount"><option>Loading...</option></select>
+  </div>
+  <div class="control-group">
+    <label>Columns</label>
+    <div class="checkbox-group">
+      <label><input type="checkbox" value="date" checked> Date</label>
+      <label><input type="checkbox" value="payee" checked> Payee</label>
+      <label><input type="checkbox" value="amount" checked> Amount</label>
+      <label><input type="checkbox" value="category"> Category</label>
+      <label><input type="checkbox" value="external_id"> Ext ID</label>
+    </div>
+  </div>
+  <button id="runBtn" onclick="runReconcile()">Reconcile</button>
+  <button id="exportBtn" class="export-btn" onclick="exportCSV()" disabled>Export CSV</button>
+</div>
+
+<div id="errorBox" class="error" style="display:none"></div>
+
+<div class="summary" id="summaryBox" style="display:none">
+  <div class="stat match"><div class="value" id="matchCount">0</div><div class="label">Match</div></div>
+  <div class="stat mismatch"><div class="value" id="mismatchCount">0</div><div class="label">Mismatch</div></div>
+  <div class="stat pg-only"><div class="value" id="pgOnlyCount">0</div><div class="label">PG Only</div></div>
+  <div class="stat bean-only"><div class="value" id="beanOnlyCount">0</div><div class="label">Bean Only</div></div>
+  <div class="stat"><div class="value" id="totalCount">0</div><div class="label">Total</div></div>
+</div>
+
+<div id="resultsArea"></div>
+
+<script>
+let lastParams = null;
+
+async function loadAccounts() {
+  try {
+    const resp = await fetch('/api/accounts');
+    const data = await resp.json();
+    const sel = document.getElementById('pgAccount');
+    sel.innerHTML = '';
+    if (data.pg_accounts && data.pg_accounts.length > 0) {
+      data.pg_accounts.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a; opt.textContent = a;
+        sel.appendChild(opt);
+      });
+    } else {
+      sel.innerHTML = '<option>No accounts found</option>';
+    }
+  } catch(e) {
+    document.getElementById('errorBox').textContent = 'Failed to load accounts: ' + e.message;
+    document.getElementById('errorBox').style.display = 'block';
+  }
+}
+
+async function runReconcile() {
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true; btn.textContent = 'Running...';
+  document.getElementById('errorBox').style.display = 'none';
+  document.getElementById('resultsArea').innerHTML = '<div class="loading">Reconciling...</div>';
+
+  const columns = Array.from(document.querySelectorAll('.checkbox-group input:checked')).map(cb => cb.value);
+  const params = {
+    date_from: document.getElementById('dateFrom').value,
+    date_to: document.getElementById('dateTo').value,
+    pg_account: document.getElementById('pgAccount').value,
+    columns: columns,
+    group_by: columns.join(','),
+  };
+  lastParams = params;
+
+  try {
+    const resp = await fetch('/api/reconcile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('errorBox').textContent = data.error;
+      document.getElementById('errorBox').style.display = 'block';
+      document.getElementById('resultsArea').innerHTML = '';
+      return;
+    }
+    renderResults(data);
+    document.getElementById('exportBtn').disabled = false;
+  } catch(e) {
+    document.getElementById('errorBox').textContent = 'Request failed: ' + e.message;
+    document.getElementById('errorBox').style.display = 'block';
+    document.getElementById('resultsArea').innerHTML = '';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Reconcile';
+  }
+}
+
+function renderResults(data) {
+  const s = data.summary;
+  document.getElementById('matchCount').textContent = s.match;
+  document.getElementById('mismatchCount').textContent = s.mismatch;
+  document.getElementById('pgOnlyCount').textContent = s.pg_only;
+  document.getElementById('beanOnlyCount').textContent = s.bean_only;
+  document.getElementById('totalCount').textContent = s.total;
+  document.getElementById('summaryBox').style.display = 'flex';
+
+  if (data.results.length === 0) {
+    document.getElementById('resultsArea').innerHTML = '<div class="loading">No results found for this period.</div>';
+    return;
+  }
+
+  let html = '<table><thead><tr><th>Status</th><th>Date</th><th>Payee</th><th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th></tr></thead><tbody>';
+  for (const r of data.results) {
+    const k = r.key;
+    html += `<tr class="${r.status}">`;
+    html += `<td><span class="status-badge">${r.status}</span></td>`;
+    html += `<td>${k.date || ''}</td>`;
+    html += `<td>${k.payee || k.narration || ''}</td>`;
+    html += `<td>${r.pg_amount ?? '—'}</td>`;
+    html += `<td>${r.bean_amount ?? '—'}</td>`;
+    html += `<td>${r.diff}</td>`;
+    html += `<td>${r.pg_count}</td>`;
+    html += `<td>${r.bean_count}</td>`;
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('resultsArea').innerHTML = html;
+}
+
+function exportCSV() {
+  if (!lastParams) return;
+  const p = new URLSearchParams({
+    date_from: lastParams.date_from,
+    date_to: lastParams.date_to,
+    pg_account: lastParams.pg_account,
+  });
+  window.location.href = '/api/export?' + p.toString();
+}
+
+loadAccounts();
+</script>
+</body>
+</html>
