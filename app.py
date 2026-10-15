@@ -345,3 +345,68 @@ async def export_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=reconcile_{pg_account}_{date_from}.csv"},
     )
+
+
+@app.post("/api/import")
+async def import_bean_only(body: dict[str, Any]):
+    """Import BEAN_ONLY reconciliation records into PG."""
+    pg_account = body.get("pg_account", "")
+    records = body.get("records", [])
+    if not pg_account or not records:
+        return {"error": "pg_account and records required"}
+
+    bean_account, sign_mult = ACCOUNT_MAP.get(pg_account, (None, 1))
+    if not bean_account:
+        return {"error": f"Unknown account: {pg_account}"}
+
+    imported = 0
+    skipped = 0
+    conn = get_pg_conn()
+    try:
+        cur = conn.cursor()
+        for rec in records:
+            key = rec.get("key", {})
+            bean_amount = rec.get("bean_amount")
+            if bean_amount is None:
+                continue
+            # Reverse the sign multiplier to get the original Bean amount for storage
+            raw_amount = Decimal(str(bean_amount)) / Decimal(str(sign_mult))
+            date_val = key.get("transaction_date") or key.get("date", "")
+            payee = key.get("payee", "")
+            description = key.get("description", "")
+            category = key.get("category", "")
+            external_id = key.get("external_id", "")
+            # Generate external_id if missing
+            if not external_id:
+                import hashlib
+                h = hashlib.sha256(f"{date_val}|{payee}|{raw_amount}|{bean_account}".encode()).hexdigest()[:16]
+                external_id = f"bean-import-{h}"
+            try:
+                cur.execute(
+                    """INSERT INTO transactions
+                       (external_id, transaction_date, account_name, type, amount,
+                        payee, description, category, meta)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (external_id) DO NOTHING""",
+                    (
+                        external_id,
+                        date_val,
+                        pg_account,
+                        "debit" if raw_amount > 0 else "credit",
+                        float(raw_amount),
+                        payee,
+                        description,
+                        category,
+                        {"source": "bean_import", "bean_account": bean_account},
+                    ),
+                )
+                if cur.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                skipped += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"imported": imported, "skipped": skipped}

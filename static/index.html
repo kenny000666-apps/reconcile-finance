@@ -72,6 +72,7 @@
   </div>
   <button id="runBtn" onclick="runReconcile()">Reconcile</button>
   <button id="exportBtn" class="export-btn" onclick="exportCSV()" disabled>Export CSV</button>
+  <button id="importBtn" style="background:#6f42c1" onclick="importBeanOnly()" disabled>Import BEAN_ONLY → PG</button>
 </div>
 
 <div id="errorBox" class="error" style="display:none"></div>
@@ -140,7 +141,10 @@ async function runReconcile() {
       return;
     }
     renderResults(data);
+    lastResults = data.results;
     document.getElementById('exportBtn').disabled = false;
+    const hasBeanOnly = data.results.some(r => r.status === 'BEAN_ONLY');
+    document.getElementById('importBtn').disabled = !hasBeanOnly;
   } catch(e) {
     document.getElementById('errorBox').textContent = 'Request failed: ' + e.message;
     document.getElementById('errorBox').style.display = 'block';
@@ -181,8 +185,7 @@ function renderResults(data) {
     for (const c of cols) {
       if (c === 'amount') continue;
       const val = k[c] || k.narration || '';
-      const display = c === 'external_id' ? (val ? val.substring(0,12) + '…' : '') : val;
-      html += `<td title="${val}">${display}</td>`;
+      html += `<td title="${val}">${val || ''}</td>`;
     }
     html += `<td>${r.pg_amount ?? '—'}</td>`;
     html += `<td>${r.bean_amount ?? '—'}</td>`;
@@ -193,6 +196,47 @@ function renderResults(data) {
   }
   html += '</tbody></table>';
   document.getElementById('resultsArea').innerHTML = html;
+}
+
+let lastResults = null;
+
+async function importBeanOnly() {
+  if (!lastResults || !lastParams) return;
+  const beanOnly = lastResults.filter(r => r.status === 'BEAN_ONLY');
+  if (beanOnly.length === 0) {
+    alert('No BEAN_ONLY records to import.');
+    return;
+  }
+  if (!confirm(`Import ${beanOnly.length} BEAN_ONLY record(s) into PG?`)) return;
+
+  const btn = document.getElementById('importBtn');
+  btn.disabled = true; btn.textContent = 'Importing...';
+
+  try {
+    const resp = await fetch('/api/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        pg_account: lastParams.pg_account,
+        records: beanOnly.map(r => ({
+          key: r.key,
+          bean_amount: r.bean_amount,
+          bean_count: r.bean_count,
+        })),
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert('Import failed: ' + data.error);
+    } else {
+      alert(`Imported ${data.imported} record(s). Skipped ${data.skipped} duplicate(s).`);
+      runReconcile();
+    }
+  } catch(e) {
+    alert('Import request failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Import BEAN_ONLY → PG';
+  }
 }
 
 function exportCSV() {
