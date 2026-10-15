@@ -164,13 +164,26 @@ function renderResults(data) {
     return;
   }
 
-  let html = '<table><thead><tr><th>Status</th><th>Date</th><th>Payee</th><th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th></tr></thead><tbody>';
+  // Build dynamic columns based on what was selected
+  const cols = lastParams ? lastParams.columns : ['date','payee','amount'];
+  let hdrCols = '<th>Status</th>';
+  for (const c of cols) {
+    if (c === 'amount') continue; // amount shown as PG/Bean/Diff
+    const label = c === 'external_id' ? 'Ext ID' : c.charAt(0).toUpperCase() + c.slice(1);
+    hdrCols += `<th>${label}</th>`;
+  }
+  hdrCols += '<th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th>';
+  let html = `<table><thead><tr>${hdrCols}</tr></thead><tbody>`;
   for (const r of data.results) {
     const k = r.key;
     html += `<tr class="${r.status}">`;
     html += `<td><span class="status-badge">${r.status}</span></td>`;
-    html += `<td>${k.date || ''}</td>`;
-    html += `<td>${k.payee || k.narration || ''}</td>`;
+    for (const c of cols) {
+      if (c === 'amount') continue;
+      const val = k[c] || k.narration || '';
+      const display = c === 'external_id' ? (val ? val.substring(0,12) + '…' : '') : val;
+      html += `<td title="${val}">${display}</td>`;
+    }
     html += `<td>${r.pg_amount ?? '—'}</td>`;
     html += `<td>${r.bean_amount ?? '—'}</td>`;
     html += `<td>${r.diff}</td>`;

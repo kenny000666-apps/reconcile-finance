@@ -135,11 +135,15 @@ async def reconcile(body: dict[str, Any]):
                 "count": row["tx_count"],
                 "ext_ids": row["ext_ids"] or [],
             }
-            # Index by first non-null external_id for primary matching
+            # Add external_id to key_dict for display when selected
+            first_eid = None
             for eid in (row["ext_ids"] or []):
                 if eid:
-                    pg_by_extid[str(eid)] = entry
+                    first_eid = str(eid)
+                    pg_by_extid[first_eid] = entry
                     break
+            if "external_id" in group_cols:
+                entry["key_dict"]["external_id"] = first_eid or ""
             pg_by_key[key] = entry
         cur.close()
         conn.close()
@@ -181,8 +185,11 @@ async def reconcile(body: dict[str, Any]):
                     bean_by_extid[eid_str]["amount"] += signed_amount
                     bean_by_extid[eid_str]["count"] += 1
                 else:
+                    kd = dict(zip([c for c in group_cols if c != 'external_id'], key))
+                    if "external_id" in group_cols:
+                        kd["external_id"] = eid_str
                     bean_by_extid[eid_str] = {
-                        "key_dict": dict(zip(group_cols, key)),
+                        "key_dict": kd,
                         "amount": signed_amount,
                         "count": 1,
                     }
