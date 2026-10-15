@@ -73,7 +73,7 @@
       <label><input type="checkbox" value="external_id"> Ext ID</label>
     </div>
   </div>
-  <button id="runBtn" onclick="runReconcile()">Reconcile</button>
+  <button id="runBtn" onclick="runReconcile()" disabled>Reconcile</button>
   <button id="exportBtn" class="export-btn" onclick="exportCSV()" disabled>Export CSV</button>
   <button id="importBtn" style="background:#6f42c1" onclick="importBeanOnly()" disabled>Import BEAN_ONLY → PG</button>
 </div>
@@ -105,6 +105,7 @@ async function loadAccounts() {
         opt.value = a; opt.textContent = a;
         sel.appendChild(opt);
       });
+      document.getElementById('runBtn').disabled = false;
     } else {
       sel.innerHTML = '<option>No accounts found</option>';
     }
@@ -115,6 +116,13 @@ async function loadAccounts() {
 }
 
 async function runReconcile() {
+  const pgAccount = document.getElementById('pgAccount').value;
+  if (!pgAccount || pgAccount === 'Loading...' || pgAccount === 'No accounts found') {
+    document.getElementById('errorBox').textContent = 'Please wait for accounts to load, then select a valid account.';
+    document.getElementById('errorBox').style.display = 'block';
+    return;
+  }
+
   const btn = document.getElementById('runBtn');
   btn.disabled = true; btn.textContent = 'Running...';
   document.getElementById('errorBox').style.display = 'none';
@@ -124,7 +132,7 @@ async function runReconcile() {
   const params = {
     date_from: document.getElementById('dateFrom').value,
     date_to: document.getElementById('dateTo').value,
-    pg_account: document.getElementById('pgAccount').value,
+    pg_account: pgAccount,
     columns: columns,
     group_by: columns.join(','),
   };

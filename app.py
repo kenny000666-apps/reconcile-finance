@@ -93,6 +93,10 @@ async def reconcile(body: dict[str, Any]):
     # rounding differences, fees, and timing offsets between PG and Beancount.
     tolerance = Decimal(str(body.get("tolerance", "0.50")))
 
+    # Guard against frontend race condition sending placeholder values
+    if pg_account in ("Loading...", "No accounts found", ""):
+        return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
+
     mapping = ACCOUNT_MAP.get(pg_account)
     if not mapping:
         return {"error": f"No mapping for PG account: {pg_account}"}
