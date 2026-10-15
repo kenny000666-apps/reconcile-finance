@@ -146,32 +146,55 @@ async def reconcile(body: dict[str, Any]):
     except Exception as e:
         return {"error": f"PG query failed: {e}", "results": []}
 
-    # Phase 2: Query Bean
-    bean_by_key = {}
+    # Phase 2: Query Bean — extract individual postings with external_id from metadata
+    bean_by_extid = {}  # external_id -> row data
+    bean_by_key = {}    # composite key -> aggregated row data
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
         bean_group_cols = [bean_col_map.get(c, c) for c in group_cols]
         bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
-        # BQL requires unquoted date literals (e.g., 2025-01-01 not '2025-01-01')
-        # and does not support count(*) — we compute count from grouped rows
+        # Extract individual postings with external_id from transaction metadata.
+        # BQL doesn't support aggregating metadata in GROUP BY, so we fetch raw
+        # postings and aggregate in Python.
         bean_query = f"""
-            SELECT {bean_select}, sum(units(position).number) as total_amount
+            SELECT {bean_select}, units(position).number as amount,
+                   getitem(entry.meta, 'external_id') as external_id
             FROM postings
             WHERE account ~ '{bean_account_regex}'
               AND date >= {date_from} AND date < {date_to}
-            GROUP BY {bean_select}
             ORDER BY {bean_select}
         """
         cur.execute(bean_query)
         for row in cur.fetchall():
             key = tuple(str(row[i]) for i in range(len(bean_group_cols)))
-            raw_amount = Decimal(str(row[-1]))
-            bean_by_key[key] = {
-                "key_dict": dict(zip(group_cols, key)),
-                "amount": raw_amount * sign_mult,
-                "count": 1,  # Each grouped row represents one transaction group
-            }
+            raw_amount = Decimal(str(row[len(bean_group_cols)]))
+            ext_id = row[len(bean_group_cols) + 1]  # May be None
+            signed_amount = raw_amount * sign_mult
+
+            # Index by external_id for Pass A matching
+            if ext_id:
+                eid_str = str(ext_id)
+                if eid_str in bean_by_extid:
+                    bean_by_extid[eid_str]["amount"] += signed_amount
+                    bean_by_extid[eid_str]["count"] += 1
+                else:
+                    bean_by_extid[eid_str] = {
+                        "key_dict": dict(zip(group_cols, key)),
+                        "amount": signed_amount,
+                        "count": 1,
+                    }
+
+            # Aggregate by composite key for Pass B fallback
+            if key in bean_by_key:
+                bean_by_key[key]["amount"] += signed_amount
+                bean_by_key[key]["count"] += 1
+            else:
+                bean_by_key[key] = {
+                    "key_dict": dict(zip(group_cols, key)),
+                    "amount": signed_amount,
+                    "count": 1,
+                }
         cur.close()
         bconn.close()
     except Exception as e:
@@ -182,13 +205,33 @@ async def reconcile(body: dict[str, Any]):
     matched_bean_keys = set()
     results = []
 
-    # Pass A: Match by external_id (if PG has ext_ids that map to bean keys)
-    # For now, external_id matching is reserved for when bean side also carries IDs.
-    # Since beanquery doesn't easily expose metadata in GROUP BY, we skip to Pass B.
+    # Pass A: Match by external_id (primary — most reliable)
+    for eid, pg_entry in pg_by_extid.items():
+        bean_entry = bean_by_extid.get(eid)
+        if bean_entry:
+            diff = pg_entry["amount"] - bean_entry["amount"]
+            status = "MATCH" if abs(diff) <= tolerance else "MISMATCH"
+            results.append({
+                "key": pg_entry["key_dict"],
+                "pg_amount": str(pg_entry["amount"]),
+                "bean_amount": str(bean_entry["amount"]),
+                "diff": str(diff),
+                "pg_count": pg_entry["count"],
+                "bean_count": bean_entry["count"],
+                "status": status,
+                "match_type": "external_id",
+            })
+            # Mark the corresponding composite keys as matched
+            pg_key = tuple(pg_entry["key_dict"].get(c) for c in group_cols)
+            bean_key = tuple(bean_entry["key_dict"].get(c) for c in group_cols)
+            matched_pg_keys.add(pg_key)
+            matched_bean_keys.add(bean_key)
 
-    # Pass B: Match by composite key (group columns only, no amount in key)
+    # Pass B: Match by composite key (fallback — skip keys already matched in Pass A)
     all_keys = set(pg_by_key.keys()) | set(bean_by_key.keys())
     for key in sorted(all_keys):
+        if key in matched_pg_keys or key in matched_bean_keys:
+            continue
         pg = pg_by_key.get(key)
         bean = bean_by_key.get(key)
         key_dict = (pg or bean)["key_dict"]
@@ -203,6 +246,7 @@ async def reconcile(body: dict[str, Any]):
                 "pg_count": pg["count"],
                 "bean_count": bean["count"],
                 "status": status,
+                "match_type": "composite_key",
             })
             matched_pg_keys.add(key)
             matched_bean_keys.add(key)
