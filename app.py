@@ -129,18 +129,23 @@ async def reconcile(body: dict[str, Any]):
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
+        # Map frontend column names to BQL equivalents; 'amount' is computed, not a column
+        bean_col_map = {"date": "date", "payee": "payee", "description": "narration", "account": "account"}
+        bean_group_cols = [bean_col_map.get(c, c) for c in columns if c != "amount"]
+        bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
         # Build equivalent BQL
         bean_query = f"""
-            SELECT {', '.join(columns)}, sum(units(position).number) as total_amount, count(*) as tx_count
+            SELECT {bean_select}, sum(units(position).number) as total_amount, count(*) as tx_count
             FROM postings
             WHERE account ~ '{bean_account_regex}'
               AND date >= {date_from} AND date < {date_to}
-            GROUP BY {', '.join(columns)}
-            ORDER BY {', '.join(columns)}
+            GROUP BY {bean_select}
+            ORDER BY {bean_select}
         """
         cur.execute(bean_query)
         for row in cur.fetchall():
-            key = tuple(str(row[i]) for i in range(len(columns)))
+            # Key uses only the group columns (excludes amount/count)
+            key = tuple(str(row[i]) for i in range(len(bean_group_cols)))
             raw_amount = Decimal(str(row[-2]))
             bean_rows[key] = {
                 "amount": raw_amount * sign_mult,
