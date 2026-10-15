@@ -89,6 +89,9 @@ async def reconcile(body: dict[str, Any]):
     pg_account = body.get("pg_account", "BarclaysPersonal")
     columns = body.get("columns", ["date", "payee", "amount"])
     group_by = body.get("group_by", "date,payee")
+    # Tolerance for amount matching (in currency units). Default 0.50 covers
+    # rounding differences, fees, and timing offsets between PG and Beancount.
+    tolerance = Decimal(str(body.get("tolerance", "0.50")))
 
     mapping = ACCOUNT_MAP.get(pg_account)
     if not mapping:
@@ -191,7 +194,7 @@ async def reconcile(body: dict[str, Any]):
         key_dict = (pg or bean)["key_dict"]
         if pg and bean:
             diff = pg["amount"] - bean["amount"]
-            status = "MATCH" if diff == 0 else "MISMATCH"
+            status = "MATCH" if abs(diff) <= tolerance else "MISMATCH"
             results.append({
                 "key": key_dict,
                 "pg_amount": str(pg["amount"]),
