@@ -102,6 +102,10 @@ async def reconcile(body: dict[str, Any]):
     col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
                "payee": "payee", "description": "description", "category": "category"}
     bean_col_map = {"date": "date", "transaction_date": "date", "payee": "payee", "description": "narration", "account": "account", "account_name": "account"}
+    # Columns that exist in PG but not in Beancount's postings table.
+    # These are filtered out of BQL queries and injected as empty strings
+    # into Bean key_dicts so composite keys stay aligned with PG entries.
+    pg_only_cols = {"external_id", "category"}
 
     # Grouping columns exclude 'amount' — amount is a comparison value, not a key dimension
     group_cols = [c for c in columns if c != "amount"]
@@ -156,9 +160,10 @@ async def reconcile(body: dict[str, Any]):
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
-        # Filter out external_id from group cols — it's not a BQL column,
-        # it's extracted via getitem() in the SELECT clause below.
-        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols if c != 'external_id']
+        # Filter out PG-only columns from BQL query — they don't exist
+        # in Beancount's postings table. external_id is extracted via
+        # getitem() in the SELECT clause; category has no Bean equivalent.
+        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols if c not in pg_only_cols]
         bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
         # Extract individual postings with external_id from transaction metadata.
         # BQL doesn't support aggregating metadata in GROUP BY, so we fetch raw
@@ -185,9 +190,13 @@ async def reconcile(body: dict[str, Any]):
                     bean_by_extid[eid_str]["amount"] += signed_amount
                     bean_by_extid[eid_str]["count"] += 1
                 else:
-                    kd = dict(zip([c for c in group_cols if c != 'external_id'], key))
+                    bean_cols_in_key = [c for c in group_cols if c not in pg_only_cols]
+                    kd = dict(zip(bean_cols_in_key, key))
+                    # Inject PG-only columns into key_dict so frontend can display them
                     if "external_id" in group_cols:
                         kd["external_id"] = eid_str
+                    if "category" in group_cols:
+                        kd["category"] = ""
                     bean_by_extid[eid_str] = {
                         "key_dict": kd,
                         "amount": signed_amount,
@@ -199,8 +208,14 @@ async def reconcile(body: dict[str, Any]):
                 bean_by_key[key]["amount"] += signed_amount
                 bean_by_key[key]["count"] += 1
             else:
+                bean_cols_in_key = [c for c in group_cols if c not in pg_only_cols]
+                kd = dict(zip(bean_cols_in_key, key))
+                # Inject PG-only columns as empty so keys align with PG entries
+                for pg_col in pg_only_cols:
+                    if pg_col in group_cols:
+                        kd[pg_col] = ""
                 bean_by_key[key] = {
-                    "key_dict": dict(zip(group_cols, key)),
+                    "key_dict": kd,
                     "amount": signed_amount,
                     "count": 1,
                 }
