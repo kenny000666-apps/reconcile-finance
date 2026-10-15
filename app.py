@@ -152,7 +152,9 @@ async def reconcile(body: dict[str, Any]):
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
-        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols]
+        # Filter out external_id from group cols — it's not a BQL column,
+        # it's extracted via getitem() in the SELECT clause below.
+        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols if c != 'external_id']
         bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
         # Extract individual postings with external_id from transaction metadata.
         # BQL doesn't support aggregating metadata in GROUP BY, so we fetch raw
