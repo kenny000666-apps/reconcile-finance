@@ -106,138 +106,118 @@ async def reconcile(body: dict[str, Any]):
     col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
                "payee": "payee", "description": "description", "category": "category"}
     bean_col_map = {"date": "date", "transaction_date": "date", "payee": "payee", "description": "narration", "account": "account", "account_name": "account"}
-    # Columns that exist in PG but not in Beancount's postings table.
-    # These are filtered out of BQL queries and injected as empty strings
-    # into Bean key_dicts so composite keys stay aligned with PG entries.
-    pg_only_cols = {"external_id", "category"}
 
-    # Grouping columns exclude 'amount' — amount is a comparison value, not a key dimension
-    group_cols = [c for c in columns if c != "amount"]
-    if not group_cols:
-        group_cols = ["date"]
+    # Always group by external_id as primary key for stable 1:1 matching.
+    # Display columns are independent from grouping — they're shown but don't affect aggregation.
+    # Fallback to date+payee composite key only for rows missing external_id.
 
-    # Phase 1: Query PG with external_id for primary matching
+    # Phase 1: Query PG — each row is one transaction (external_id is unique)
     pg_by_extid = {}   # external_id -> row data
-    pg_by_key = {}     # composite key -> row data (fallback)
+    pg_by_key = {}     # composite key (date,payee) -> row data (fallback for null external_id)
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        mapped_group_cols = [col_map.get(c, c) for c in group_cols]
-        select_parts = list(mapped_group_cols) + ["SUM(amount) as total_amount", "COUNT(*) as tx_count", "array_agg(external_id) as ext_ids"]
-        select_clause = ", ".join(select_parts)
-        group_clause = ", ".join(mapped_group_cols)
-        query = f"""
-            SELECT {select_clause}
+        query = """
+            SELECT external_id, transaction_date, payee, description, category,
+                   amount, 1 as tx_count
             FROM transactions
             WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
-            GROUP BY {group_clause}
-            ORDER BY {group_clause}
+            ORDER BY transaction_date, payee
         """
         cur.execute(query, (pg_account, date_from, date_to))
         for row in cur.fetchall():
-            key = tuple(str(row[col_map.get(c, c)]) for c in group_cols)
-            amount = Decimal(str(row["total_amount"]))
-            entry = {
-                "key_dict": dict(zip(group_cols, key)),
-                "amount": amount,
-                "count": row["tx_count"],
-                "ext_ids": row["ext_ids"] or [],
+            amount = Decimal(str(row["amount"]))
+            key_dict = {
+                "date": str(row["transaction_date"]),
+                "payee": row["payee"] or "",
+                "description": row["description"] or "",
+                "category": row["category"] or "",
+                "external_id": row["external_id"] or "",
             }
-            # Add external_id to key_dict for display when selected
-            first_eid = None
-            for eid in (row["ext_ids"] or []):
-                if eid:
-                    first_eid = str(eid)
-                    pg_by_extid[first_eid] = entry
-                    break
-            if "external_id" in group_cols:
-                entry["key_dict"]["external_id"] = first_eid or ""
-            pg_by_key[key] = entry
+            entry = {
+                "key_dict": key_dict,
+                "amount": amount,
+                "count": 1,
+            }
+            ext_id = row["external_id"]
+            if ext_id:
+                pg_by_extid[str(ext_id)] = entry
+            else:
+                # Fallback composite key for rows without external_id
+                fallback_key = (str(row["transaction_date"]), row["payee"] or "")
+                if fallback_key in pg_by_key:
+                    pg_by_key[fallback_key]["amount"] += amount
+                    pg_by_key[fallback_key]["count"] += 1
+                else:
+                    pg_by_key[fallback_key] = entry
         cur.close()
         conn.close()
     except Exception as e:
         return {"error": f"PG query failed: {e}", "results": []}
 
-    # Phase 2: Query Bean — extract individual postings with external_id from metadata
+    # Phase 2: Query Bean — fetch individual postings with external_id from metadata
     bean_by_extid = {}  # external_id -> row data
-    bean_by_key = {}    # composite key -> aggregated row data
+    bean_by_key = {}    # composite key (date,payee) -> aggregated row data (fallback)
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
-        # Filter out PG-only columns from BQL query — they don't exist
-        # in Beancount's postings table. external_id is extracted via
-        # getitem() in the SELECT clause; category has no Bean equivalent.
-        bean_group_cols = [bean_col_map.get(c, c) for c in group_cols if c not in pg_only_cols]
-        bean_select = ', '.join(bean_group_cols) if bean_group_cols else 'date'
-        # Extract individual postings with external_id from transaction metadata.
-        # BQL doesn't support aggregating metadata in GROUP BY, so we fetch raw
-        # postings and aggregate in Python.
+        # Fetch raw postings; aggregate in Python since BQL can't GROUP BY metadata
         bean_query = f"""
-            SELECT {bean_select}, units(position).number as amount,
+            SELECT date, narration, units(position).number as amount,
                    getitem(entry.meta, 'external_id') as external_id
             FROM postings
             WHERE account ~ '{bean_account_regex}'
               AND date >= {date_from} AND date < {date_to}
-            ORDER BY {bean_select}
+            ORDER BY date
         """
         cur.execute(bean_query)
         for row in cur.fetchall():
-            key = tuple(str(row[i]) for i in range(len(bean_group_cols)))
-            raw_amount = Decimal(str(row[len(bean_group_cols)]))
-            ext_id = row[len(bean_group_cols) + 1]  # May be None
+            raw_amount = Decimal(str(row[2]))
+            ext_id = row[3]  # May be None
             signed_amount = raw_amount * sign_mult
+            date_str = str(row[0])
+            narration = row[1] or ""
 
-            # Index by external_id for Pass A matching
+            key_dict = {
+                "date": date_str,
+                "payee": narration,
+                "description": narration,
+                "category": "",
+                "external_id": str(ext_id) if ext_id else "",
+            }
+
             if ext_id:
                 eid_str = str(ext_id)
                 if eid_str in bean_by_extid:
                     bean_by_extid[eid_str]["amount"] += signed_amount
                     bean_by_extid[eid_str]["count"] += 1
                 else:
-                    bean_cols_in_key = [c for c in group_cols if c not in pg_only_cols]
-                    kd = dict(zip(bean_cols_in_key, key))
-                    # Inject PG-only columns into key_dict so frontend can display them
-                    if "external_id" in group_cols:
-                        kd["external_id"] = eid_str
-                    if "category" in group_cols:
-                        kd["category"] = ""
                     bean_by_extid[eid_str] = {
-                        "key_dict": kd,
+                        "key_dict": key_dict,
                         "amount": signed_amount,
                         "count": 1,
                     }
-
-            # Aggregate by composite key for Pass B fallback
-            if key in bean_by_key:
-                bean_by_key[key]["amount"] += signed_amount
-                bean_by_key[key]["count"] += 1
-                # Update external_id if current one is empty and this posting has one
-                if ext_id and not bean_by_key[key]["key_dict"].get("external_id"):
-                    bean_by_key[key]["key_dict"]["external_id"] = str(ext_id)
             else:
-                bean_cols_in_key = [c for c in group_cols if c not in pg_only_cols]
-                kd = dict(zip(bean_cols_in_key, key))
-                # Inject PG-only columns — use actual external_id if available
-                for pg_col in pg_only_cols:
-                    if pg_col in group_cols:
-                        if pg_col == "external_id" and ext_id:
-                            kd[pg_col] = str(ext_id)
-                        else:
-                            kd[pg_col] = ""
-                bean_by_key[key] = {
-                    "key_dict": kd,
-                    "amount": signed_amount,
-                    "count": 1,
-                }
+                # Fallback composite key for postings without external_id
+                fallback_key = (date_str, narration)
+                if fallback_key in bean_by_key:
+                    bean_by_key[fallback_key]["amount"] += signed_amount
+                    bean_by_key[fallback_key]["count"] += 1
+                else:
+                    bean_by_key[fallback_key] = {
+                        "key_dict": key_dict,
+                        "amount": signed_amount,
+                        "count": 1,
+                    }
         cur.close()
         bconn.close()
     except Exception as e:
         return {"error": f"Bean query failed: {e}", "results": []}
 
     # Phase 3: Two-pass matching
-    matched_pg_keys = set()
-    matched_bean_keys = set()
     matched_bean_extids = set()  # Track external_ids consumed in Pass A
+    matched_pg_fallback_keys = set()  # Track fallback keys consumed in Pass B
+    matched_bean_fallback_keys = set()
     results = []
 
     # Pass A: Match by external_id (primary — most reliable)
@@ -257,24 +237,11 @@ async def reconcile(body: dict[str, Any]):
                 "status": status,
                 "match_type": "external_id",
             })
-            # Mark the corresponding composite keys as matched
-            pg_key = tuple(pg_entry["key_dict"].get(c) for c in group_cols)
-            bean_key = tuple(bean_entry["key_dict"].get(c) for c in group_cols)
-            matched_pg_keys.add(pg_key)
-            matched_bean_keys.add(bean_key)
-            matched_bean_extids.add(eid)  # Track consumed external_id
+            matched_bean_extids.add(eid)
 
-    # Pass B: Match by composite key (fallback — skip keys already matched in Pass A)
-    all_keys = set(pg_by_key.keys()) | set(bean_by_key.keys())
-    for key in sorted(all_keys):
-        if key in matched_pg_keys or key in matched_bean_keys:
-            continue
-        # Skip bean entries whose external_id was already matched in Pass A
-        bean_entry = bean_by_key.get(key)
-        if bean_entry:
-            bean_eid = bean_entry["key_dict"].get("external_id")
-            if bean_eid and bean_eid in matched_bean_extids:
-                continue
+    # Pass B: Match by composite key (fallback for rows without external_id)
+    all_fallback_keys = set(pg_by_key.keys()) | set(bean_by_key.keys())
+    for key in sorted(all_fallback_keys):
         pg = pg_by_key.get(key)
         bean = bean_by_key.get(key)
         key_dict = (pg or bean)["key_dict"]
@@ -291,8 +258,8 @@ async def reconcile(body: dict[str, Any]):
                 "status": status,
                 "match_type": "composite_key",
             })
-            matched_pg_keys.add(key)
-            matched_bean_keys.add(key)
+            matched_pg_fallback_keys.add(key)
+            matched_bean_fallback_keys.add(key)
         elif pg:
             results.append({
                 "key": key_dict,
@@ -312,6 +279,32 @@ async def reconcile(body: dict[str, Any]):
                 "pg_count": 0,
                 "bean_count": bean["count"],
                 "status": "BEAN_ONLY",
+            })
+
+    # Unmatched external_id entries (PG has external_id but Bean doesn't, or vice versa)
+    for eid, pg_entry in pg_by_extid.items():
+        if eid not in matched_bean_extids:
+            results.append({
+                "key": pg_entry["key_dict"],
+                "pg_amount": str(pg_entry["amount"]),
+                "bean_amount": None,
+                "diff": str(pg_entry["amount"]),
+                "pg_count": pg_entry["count"],
+                "bean_count": 0,
+                "status": "PG_ONLY",
+                "match_type": "external_id",
+            })
+    for eid, bean_entry in bean_by_extid.items():
+        if eid not in matched_bean_extids:
+            results.append({
+                "key": bean_entry["key_dict"],
+                "pg_amount": None,
+                "bean_amount": str(bean_entry["amount"]),
+                "diff": str(-bean_entry["amount"]),
+                "pg_count": 0,
+                "bean_count": bean_entry["count"],
+                "status": "BEAN_ONLY",
+                "match_type": "external_id",
             })
 
     summary = {
