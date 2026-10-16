@@ -11,7 +11,8 @@
   .controls { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap; align-items: end; }
   .control-group { display: flex; flex-direction: column; gap: 4px; }
   label { font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; }
-  input, select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+  input, select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 16px; /* 16px prevents iOS zoom */ }
+  input[type="date"] { min-height: 44px; /* Apple HIG touch target */ -webkit-appearance: none; }
   button { padding: 8px 20px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600; }
   button:hover { background: #1557b0; }
   button:disabled { background: #ccc; cursor: not-allowed; }
@@ -161,6 +162,63 @@
 <script>
 let lastParams = null;
 
+// === Form state persistence via localStorage ===
+const FORM_STATE_KEY = 'reconcile_form_state';
+
+function saveFormState() {
+  try {
+    const columns = Array.from(document.querySelectorAll('.checkbox-group input:checked')).map(cb => cb.value);
+    const state = {
+      dateFrom: document.getElementById('dateFrom').value,
+      dateTo: document.getElementById('dateTo').value,
+      pgAccount: document.getElementById('pgAccount').value,
+      columns: columns,
+      statusFilter: document.getElementById('statusFilter').value,
+    };
+    localStorage.setItem(FORM_STATE_KEY, JSON.stringify(state));
+  } catch(e) {}
+}
+
+function restoreFormState() {
+  try {
+    const raw = localStorage.getItem(FORM_STATE_KEY);
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    if (state.dateFrom) document.getElementById('dateFrom').value = state.dateFrom;
+    if (state.dateTo) document.getElementById('dateTo').value = state.dateTo;
+    // Restore PG account selection if the option exists
+    if (state.pgAccount) {
+      const sel = document.getElementById('pgAccount');
+      const optExists = Array.from(sel.options).some(o => o.value === state.pgAccount);
+      if (optExists) sel.value = state.pgAccount;
+    }
+    // Restore column checkboxes
+    if (state.columns && Array.isArray(state.columns)) {
+      document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
+        cb.checked = state.columns.includes(cb.value);
+      });
+    }
+    // Restore status filter
+    if (state.statusFilter) {
+      document.getElementById('statusFilter').value = state.statusFilter;
+    }
+  } catch(e) {}
+}
+
+// Attach change listeners for auto-save
+function attachFormListeners() {
+  ['dateFrom', 'dateTo'].forEach(id => {
+    document.getElementById(id).addEventListener('change', saveFormState);
+  });
+  document.getElementById('pgAccount').addEventListener('change', saveFormState);
+  document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', saveFormState);
+  });
+  document.getElementById('statusFilter').addEventListener('change', () => {
+    saveFormState();
+  });
+}
+
 async function loadAccounts() {
   try {
     const resp = await fetch('/api/accounts');
@@ -174,6 +232,8 @@ async function loadAccounts() {
         sel.appendChild(opt);
       });
       document.getElementById('runBtn').disabled = false;
+      // Restore saved selections now that options are populated
+      restoreFormState();
     } else {
       sel.innerHTML = '<option>No accounts found</option>';
     }
@@ -452,6 +512,7 @@ function exportCSV() {
   window.location.href = '/api/export?' + p.toString();
 }
 
+attachFormListeners();
 loadAccounts();
 </script>
 </body>
