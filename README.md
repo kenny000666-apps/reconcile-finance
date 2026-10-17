@@ -34,3 +34,13 @@ PG_PASSWORD=secret BEAN_PATH=/path/to/main.bean uvicorn app:app --reload --port 
 | `PG_USER` | `postgres` | Database user |
 | `PG_PASSWORD` | *(required)* | Database password |
 | `BEAN_PATH` | `/data/beancount/main.bean` | Path to Beancount ledger |
+
+## Debug Endpoint
+
+- **Endpoint**: `GET /api/debug`
+- **Query Parameters**:
+  - `account_name` (string, default: `BarclaysPersonal`)
+  - `date_from` (string, default: `2025-01-01`)
+  - `date_to` (string, default: `2025-01-31`)
+- **Description**: Read-only endpoint that executes the underlying PostgreSQL query and Beancount BQL query for the specified account and date range, returning raw rows, query strings, parameters, and counts. If either data source fails, errors are captured per-source (`pg_error` / `bean_error`) returning HTTP 200 with an error dict rather than 500.
+
