@@ -421,3 +421,96 @@ async def import_bean_only(body: dict[str, Any]):
     finally:
         conn.close()
     return {"imported": imported, "skipped": skipped}
+
+
+@app.get("/api/debug")
+async def debug_endpoint(
+    account_name: str = Query("BarclaysPersonal"),
+    date_from: str = Query("2025-01-01"),
+    date_to: str = Query("2025-01-31"),
+):
+    if account_name in ("Loading...", "No accounts found", ""):
+        return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
+
+    mapping = ACCOUNT_MAP.get(account_name)
+    if not mapping:
+        return {"error": f"No mapping for PG account: {account_name}"}
+    bean_account_regex, sign_mult = mapping
+
+    pg_rows = []
+    pg_error = None
+    query = """
+            SELECT external_id, transaction_date, payee, description, category,
+                   amount, 1 as tx_count
+            FROM transactions
+            WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
+            ORDER BY transaction_date, payee
+        """
+    try:
+        conn = get_pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(query, (account_name, date_from, date_to))
+            for row in cur.fetchall():
+                clean_row = {}
+                for k, v in row.items():
+                    if isinstance(v, Decimal):
+                        clean_row[k] = str(v)
+                    elif hasattr(v, 'isoformat'):
+                        clean_row[k] = v.isoformat()
+                    else:
+                        clean_row[k] = v
+                pg_rows.append(clean_row)
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        pg_error = f"PG query failed: {e}"
+
+    bean_rows = []
+    bean_error = None
+    bean_query = f"""
+            SELECT date, narration, units(position).number as amount,
+                   getitem(entry.meta, 'external_id') as external_id
+            FROM postings
+            WHERE account ~ '{bean_account_regex}'
+              AND date >= {date_from} AND date < {date_to}
+            ORDER BY date
+        """
+    try:
+        bconn = get_bean_conn()
+        try:
+            cur = bconn.cursor()
+            cur.execute(bean_query)
+            for row in cur.fetchall():
+                raw_amount = Decimal(str(row[2])) if row[2] is not None else Decimal("0")
+                signed_amount = raw_amount * Decimal(str(sign_mult))
+                ext_id = row[3]
+                bean_rows.append({
+                    "date": str(row[0]) if row[0] is not None else "",
+                    "narration": row[1] or "",
+                    "amount": str(raw_amount),
+                    "signed_amount": str(signed_amount),
+                    "external_id": str(ext_id) if ext_id else "",
+                })
+            cur.close()
+        finally:
+            bconn.close()
+    except Exception as e:
+        bean_error = f"Bean query failed: {e}"
+
+    result = {
+        "pg_query": query.strip(),
+        "pg_params": [account_name, date_from, date_to],
+        "pg_rows": pg_rows,
+        "pg_count": len(pg_rows),
+        "bean_query": bean_query.strip(),
+        "bean_rows": bean_rows,
+        "bean_count": len(bean_rows),
+    }
+    if pg_error:
+        result["pg_error"] = pg_error
+    if bean_error:
+        result["bean_error"] = bean_error
+    return result
+

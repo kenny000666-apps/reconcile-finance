@@ -102,6 +102,20 @@
     .stat { flex: 1 1 calc(50% - 8px); }
     .checkbox-group label { font-size: 12px; }
   }
+  /* Debug modal */
+  .debug-pre-container { position: relative; margin-top: 6px; }
+  .debug-pre { background: #f1f3f4; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; overflow-x: auto; max-height: 150px; border: 1px solid #ddd; white-space: pre-wrap; word-break: break-word; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; padding: 4px 8px; background: #fff; border: 1px solid #ccc; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; }
+  .copy-btn:hover { background: #e8eaed; }
+  .debug-tables-container { display: flex; gap: 20px; flex-wrap: wrap; }
+  .debug-table-box { flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 8px; }
+  .debug-table-scroll { max-height: 400px; overflow: auto; border: 1px solid #eee; border-radius: 6px; background: #fff; }
+  .debug-table-scroll table { width: 100%; border-collapse: collapse; }
+  .debug-table-scroll th { position: sticky; top: 0; background: #f8f9fa; z-index: 1; }
+  @media (max-width: 768px) {
+    .debug-tables-container { flex-direction: column; }
+    .debug-table-box { min-width: 0; }
+  }
 </style>
 </head>
 <body>
@@ -133,6 +147,7 @@
   <button id="runBtn" onclick="runReconcile()" disabled>Reconcile</button>
   <button id="exportBtn" class="export-btn" onclick="exportCSV()" disabled>Export CSV</button>
   <button id="importBtn" style="background:#6f42c1" onclick="importBeanOnly()" disabled>Import BEAN_ONLY → PG</button>
+  <button id="debugBtn" style="background:#444;" onclick="openDebugModal()" disabled>🐞 Debug</button>
 </div>
 
 <div id="errorBox" class="error" style="display:none"></div>
@@ -158,6 +173,19 @@
 </div>
 
 <div id="resultsArea"></div>
+
+<!-- Debug Modal -->
+<div id="debugModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center; padding:20px;">
+  <div style="background:#fff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.2); width:100%; max-width:1200px; max-height:90vh; display:flex; flex-direction:column; overflow:hidden;">
+    <div style="padding:15px 20px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; background:#f8f9fa;">
+      <h3 style="font-size:18px; color:#1a1a2e;">🐞 Debug Inspector</h3>
+      <button onclick="closeDebugModal()" style="padding:4px 10px; background:#666; font-size:12px;">Close &times;</button>
+    </div>
+    <div id="debugModalContent" style="padding:20px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:20px;">
+      <div class="loading">Loading debug data...</div>
+    </div>
+  </div>
+</div>
 
 <script>
 let lastParams = null;
@@ -232,6 +260,7 @@ async function loadAccounts() {
         sel.appendChild(opt);
       });
       document.getElementById('runBtn').disabled = false;
+      document.getElementById('debugBtn').disabled = false;
       // Restore saved selections now that options are populated
       restoreFormState();
     } else {
@@ -514,6 +543,147 @@ function exportCSV() {
 
 attachFormListeners();
 loadAccounts();
+
+function openDebugModal() {
+  const pgAccount = document.getElementById('pgAccount').value;
+  if (!pgAccount || pgAccount === 'Loading...' || pgAccount === 'No accounts found') {
+    alert('Please select a valid account first.');
+    return;
+  }
+  document.getElementById('debugModal').style.display = 'flex';
+  fetchDebugData();
+}
+
+function closeDebugModal() {
+  document.getElementById('debugModal').style.display = 'none';
+}
+
+async function fetchDebugData() {
+  const pgAccount = document.getElementById('pgAccount').value;
+  const dateFrom = document.getElementById('dateFrom').value;
+  const dateTo = document.getElementById('dateTo').value;
+  const container = document.getElementById('debugModalContent');
+  container.innerHTML = '<div class="loading">Loading debug data...</div>';
+
+  const params = new URLSearchParams({
+    account_name: pgAccount,
+    date_from: dateFrom,
+    date_to: dateTo,
+  });
+
+  try {
+    const resp = await fetch('/api/debug?' + params.toString());
+    const data = await resp.json();
+    if (data.error) {
+      container.innerHTML = `<div class="error">${data.error}</div>`;
+      return;
+    }
+    renderDebugContent(data, pgAccount, dateFrom, dateTo);
+  } catch(e) {
+    container.innerHTML = `<div class="error">Failed to fetch debug data: ${e.message}</div>`;
+  }
+}
+
+function renderDebugContent(data, pgAccount, dateFrom, dateTo) {
+  const container = document.getElementById('debugModalContent');
+
+  let html = `
+    <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #e9ecef;">
+      <strong>Account:</strong> ${pgAccount} | <strong>Range:</strong> ${dateFrom} to ${dateTo} | <strong>PG Count:</strong> ${data.pg_count} | <strong>Bean Count:</strong> ${data.bean_count}
+    </div>
+  `;
+
+  if (data.pg_error) {
+    html += `<div class="error"><strong>PG Error:</strong> ${data.pg_error}</div>`;
+  }
+  if (data.bean_error) {
+    html += `<div class="error"><strong>Bean Error:</strong> ${data.bean_error}</div>`;
+  }
+
+  // PG Query block
+  html += `
+    <div>
+      <label>PostgreSQL Query (${data.pg_count} rows)</label>
+      <div class="debug-pre-container">
+        <pre class="debug-pre" id="pgQueryPre">${escapeHtml(data.pg_query)}</pre>
+        <button class="copy-btn" onclick="copyText('pgQueryPre')">Copy SQL</button>
+      </div>
+      <div style="font-size:12px; color:#666; margin-top:4px;">Params: <code>${escapeHtml(JSON.stringify(data.pg_params))}</code></div>
+    </div>
+  `;
+
+  // Bean Query block
+  html += `
+    <div>
+      <label>Beancount Query (${data.bean_count} rows)</label>
+      <div class="debug-pre-container">
+        <pre class="debug-pre" id="beanQueryPre">${escapeHtml(data.bean_query)}</pre>
+        <button class="copy-btn" onclick="copyText('beanQueryPre')">Copy BQL</button>
+      </div>
+    </div>
+  `;
+
+  // Side by side tables
+  html += `<div class="debug-tables-container">`;
+
+  // PG Table
+  html += `<div class="debug-table-box">`;
+  html += `<label>PostgreSQL Raw Rows (${data.pg_rows.length})</label>`;
+  html += `<div class="debug-table-scroll">`;
+  if (data.pg_rows.length === 0) {
+    html += `<div style="padding:20px; text-align:center; color:#666;">No PG rows returned.</div>`;
+  } else {
+    const pgCols = Object.keys(data.pg_rows[0]);
+    html += `<table><thead><tr>`;
+    pgCols.forEach(c => html += `<th>${c}</th>`);
+    html += `</tr></thead><tbody>`;
+    data.pg_rows.forEach(r => {
+      html += `<tr>`;
+      pgCols.forEach(c => html += `<td>${escapeHtml(String(r[c] ?? ''))}</td>`);
+      html += `</tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  html += `</div></div>`;
+
+  // Bean Table
+  html += `<div class="debug-table-box">`;
+  html += `<label>Beancount Raw Rows (${data.bean_rows.length})</label>`;
+  html += `<div class="debug-table-scroll">`;
+  if (data.bean_rows.length === 0) {
+    html += `<div style="padding:20px; text-align:center; color:#666;">No Beancount rows returned.</div>`;
+  } else {
+    const beanCols = Object.keys(data.bean_rows[0]);
+    html += `<table><thead><tr>`;
+    beanCols.forEach(c => html += `<th>${c}</th>`);
+    html += `</tr></thead><tbody>`;
+    data.bean_rows.forEach(r => {
+      html += `<tr>`;
+      beanCols.forEach(c => html += `<td>${escapeHtml(String(r[c] ?? ''))}</td>`);
+      html += `</tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  html += `</div></div>`;
+
+  html += `</div>`; // end debug-tables-container
+
+  container.innerHTML = html;
+}
+
+function copyText(elementId) {
+  const text = document.getElementById(elementId).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    alert('Copied to clipboard!');
+  }).catch(err => {
+    alert('Failed to copy: ' + err);
+  });
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 </script>
 </body>
 </html>
