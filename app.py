@@ -89,9 +89,9 @@ async def reconcile(body: dict[str, Any]):
     pg_account = body.get("pg_account", "BarclaysPersonal")
     columns = body.get("columns", ["date", "payee", "amount"])
     group_by = body.get("group_by", "date,payee")
-    # Tolerance for amount matching (in currency units). Default 0.50 covers
-    # rounding differences, fees, and timing offsets between PG and Beancount.
-    tolerance = Decimal(str(body.get("tolerance", "0.50")))
+    # Tolerance for amount matching (in currency units). Default 0.01 flags
+    # anything beyond a single cent as a mismatch between PG and Beancount.
+    tolerance = Decimal(str(body.get("tolerance", "0.01")))
 
     # Guard against frontend race condition sending placeholder values
     if pg_account in ("Loading...", "No accounts found", ""):
@@ -323,12 +323,14 @@ async def export_csv(
     date_from: str = Query("2025-01-01"),
     date_to: str = Query("2025-01-31"),
     pg_account: str = Query("BarclaysPersonal"),
+    tolerance: float = Query(0.01),
 ):
     # Re-run reconciliation to get fresh data
     body = {
         "date_from": date_from,
         "date_to": date_to,
         "pg_account": pg_account,
+        "tolerance": tolerance,
         "columns": ["date", "payee", "amount"],
         "group_by": "date,payee",
     }
