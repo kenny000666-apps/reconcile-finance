@@ -257,10 +257,21 @@ async function loadAccounts() {
     const data = await resp.json();
     const sel = document.getElementById('pgAccount');
     sel.innerHTML = '';
+    if (data.warning) {
+      console.warn('Account mapping warning:', data.warning);
+    }
     if (data.pg_accounts && data.pg_accounts.length > 0) {
+      // Build type lookup from pairs when available
+      const typeMap = {};
+      if (data.pg_account_pairs) {
+        data.pg_account_pairs.forEach(p => { typeMap[p.account_name] = p.account_type; });
+      }
       data.pg_accounts.forEach(a => {
         const opt = document.createElement('option');
-        opt.value = a; opt.textContent = a;
+        opt.value = a;
+        const t = typeMap[a];
+        opt.textContent = t ? `${a} (${t})` : a;
+        if (t) opt.dataset.accountType = t;
         sel.appendChild(opt);
       });
       document.getElementById('runBtn').disabled = false;
@@ -274,6 +285,12 @@ async function loadAccounts() {
     document.getElementById('errorBox').textContent = 'Failed to load accounts: ' + e.message;
     document.getElementById('errorBox').style.display = 'block';
   }
+}
+
+function getSelectedAccountType() {
+  const sel = document.getElementById('pgAccount');
+  const opt = sel.options[sel.selectedIndex];
+  return opt && opt.dataset.accountType ? opt.dataset.accountType : null;
 }
 
 async function runReconcile() {
@@ -290,6 +307,7 @@ async function runReconcile() {
   document.getElementById('resultsArea').innerHTML = '<div class="loading">Reconciling...</div>';
 
   const columns = Array.from(document.querySelectorAll('.checkbox-group input:checked')).map(cb => cb.value);
+  const accountType = getSelectedAccountType();
   const params = {
     date_from: document.getElementById('dateFrom').value,
     date_to: document.getElementById('dateTo').value,
@@ -298,6 +316,7 @@ async function runReconcile() {
     columns: columns,
     group_by: columns.join(','),
   };
+  if (accountType) params.account_type = accountType;
   lastParams = params;
 
   try {
@@ -515,6 +534,7 @@ async function importBeanOnly() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         pg_account: lastParams.pg_account,
+        account_type: lastParams.account_type || undefined,
         records: beanOnly.map(r => ({
           key: r.key,
           bean_amount: r.bean_amount,
@@ -544,6 +564,7 @@ function exportCSV() {
     pg_account: lastParams.pg_account,
     tolerance: lastParams.tolerance,
   });
+  if (lastParams.account_type) p.set('account_type', lastParams.account_type);
   window.location.href = '/api/export?' + p.toString();
 }
 
@@ -571,11 +592,13 @@ async function fetchDebugData() {
   const container = document.getElementById('debugModalContent');
   container.innerHTML = '<div class="loading">Loading debug data...</div>';
 
+  const accountType = getSelectedAccountType();
   const params = new URLSearchParams({
     account_name: pgAccount,
     date_from: dateFrom,
     date_to: dateTo,
   });
+  if (accountType) params.set('account_type', accountType);
 
   try {
     const resp = await fetch('/api/debug?' + params.toString());
