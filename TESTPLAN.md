@@ -25,7 +25,23 @@
 - **How**: Load UI, wait for accounts to load (enabling Reconcile and Debug buttons), click Debug button, verify modal opens, fetches `/api/debug`, displays queries with Copy buttons and raw rows tables side by side, and check that existing Reconcile, Export, and Import flows remain fully operational.
 - **Expected Result**: Modal renders correctly, copy buttons copy queries to clipboard, and existing reconciliation workflows are unaffected.
 
-## 6. Read-Only Guarantee
-- **What**: Ensure no modification queries (`INSERT`, `UPDATE`, `DELETE`, `DROP`) exist in the new `/api/debug` endpoint or frontend code.
-- **How**: Code review and static analysis of `app.py` and `static/index.html`.
-- **Expected Result**: Only `SELECT` statements are executed against PostgreSQL and Beancount, and connections are safely closed in `finally` blocks.
+## 6. Read-Only Guarantee (GET + /api/debug scope only)
+- **What**: Ensure no modification queries (`INSERT`, `UPDATE`, `DELETE`, `DROP`) exist in the GET endpoints (`/api/accounts`, `/api/export`, `/api/debug`) or in the frontend code paths that invoke them. **Scope note:** `/api/import` is intentionally a WRITE path and is excluded from this guarantee — see Test #8.
+- **How**: Code review and static analysis of `app.py` and `static/index.html`, limited to the read-only endpoints above.
+- **Expected Result**: Only `SELECT` statements are executed against PostgreSQL and Beancount on the read-only paths, and connections are safely closed in `finally` blocks.
+
+## 7. Multi-root Account Reconciliation
+- **What**: Verify the documented limitation that a single PG `account_name` (e.g. `BarclaysPersonal`) can map to multiple Beancount roots (`Liabilities:CreditCard:…`, `Assets:Current:…`, `Assets:Savings:…`), and that the current implementation only queries ONE root (the one in `ACCOUNT_MAP`).
+- **How**: Run `/api/debug?account_name=BarclaysPersonal` and inspect the generated BQL query string. Confirm the regex matches only the single Beancount root from `ACCOUNT_MAP`. Cross-check by running a manual BQL query against the other roots to confirm PG rows exist that belong to those roots.
+- **Expected Result**: The user understands that only the mapped Beancount root is queried; PG rows that logically belong to other roots (e.g. `Assets:Current:BarclaysPersonal`) will appear as `PG_ONLY` in the reconciliation output.
+
+## 8. /api/import Write Behavior
+- **What**: Verify the `/api/import` endpoint correctly inserts `BEAN_ONLY` reconciliation records into the PostgreSQL `transactions` table.
+- **How**:
+  1. Trigger a reconciliation that produces at least one `BEAN_ONLY` row.
+  2. POST those rows to `/api/import` with the corresponding `pg_account`.
+  3. Re-run the same `/api/import` request a second time with the identical payload.
+- **Expected Result**:
+  - First call inserts the rows using `INSERT ... ON CONFLICT (external_id) DO NOTHING` and returns `imported > 0, skipped = 0`.
+  - `external_id` generation for rows missing one is deterministic — derived from a `sha256` hash of `date|payee|amount|bean_account`, truncated to 16 chars, and prefixed with `bean-import-`.
+  - Second call with the same payload returns `skipped > 0, imported = 0` (no duplicates created).
