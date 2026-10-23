@@ -2,6 +2,7 @@
 import csv
 import io
 import os
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +24,7 @@ PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 
 # Account mapping: PG account name -> (bean account regex, sign multiplier)
+# Used as a fallback when the PG transactions table has no account_type column.
 ACCOUNT_MAP = {
     "AmericanExpress": ("Liabilities:CreditCard:AmericanExpress", -1),
     "BarclaysPersonal": ("Liabilities:CreditCard:BarclaysPersonal", -1),
@@ -31,6 +33,90 @@ ACCOUNT_MAP = {
     "ZopaBank": ("Assets:Current:ZopaBank", 1),
     "Discover": ("Liabilities:CreditCard:Discover", -1),
 }
+
+
+def _build_bean_regex(account_type: str, account_name: str) -> str:
+    """Build a root-agnostic BQL account regex from PG (account_type, account_name).
+
+    Matches the account under ANY Beancount root, e.g.
+    ('CreditCard', 'BarclaysPersonal') -> '.*:CreditCard:BarclaysPersonal'
+    which matches Liabilities:CreditCard:BarclaysPersonal.
+    """
+    return ".*:" + re.escape(account_type) + ":" + re.escape(account_name)
+
+
+def _sign_for_type(account_type: str) -> int:
+    """Sign multiplier: CreditCard liabilities are negative, everything else positive."""
+    return -1 if account_type == "CreditCard" else 1
+
+
+def fetch_pg_account_types():
+    """Try to read distinct (account_name, account_type) pairs from PG.
+
+    Returns (pairs, warning):
+      - pairs: list of {"account_name": str, "account_type": str} on success, else None
+      - warning: None on success, else a human-readable fallback warning string
+    """
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT account_name, account_type FROM transactions "
+            "ORDER BY account_name, account_type"
+        )
+        pairs = [
+            {"account_name": row["account_name"], "account_type": row["account_type"]}
+            for row in cur.fetchall()
+        ]
+        cur.close()
+        return pairs, None
+    except Exception as e:
+        return None, (
+            f"account_type column not available in PG transactions table "
+            f"({e}); falling back to hardcoded ACCOUNT_MAP"
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def resolve_mapping(pg_account: str, account_type: str | None = None):
+    """Resolve (bean_regex, sign_mult, warning) for a PG account.
+
+    Preference order:
+      1. Explicit (pg_account, account_type) -> root-agnostic regex
+      2. Lookup of account_type from live PG query (per account_name)
+      3. Hardcoded ACCOUNT_MAP fallback (with warning)
+    """
+    # 1. Caller supplied account_type directly (frontend sends it when known)
+    if account_type:
+        return _build_bean_regex(account_type, pg_account), _sign_for_type(account_type), None
+
+    # 2. Try to discover account_type from PG for this account_name
+    pairs, warn = fetch_pg_account_types()
+    if pairs is not None:
+        for p in pairs:
+            if p["account_name"] == pg_account:
+                at = p["account_type"]
+                return _build_bean_regex(at, pg_account), _sign_for_type(at), None
+        # account_name not found in PG at all — fall through to hardcoded map
+        mapping = ACCOUNT_MAP.get(pg_account)
+        if mapping:
+            return mapping[0], mapping[1], (
+                f"account '{pg_account}' not present in PG transactions; "
+                f"using hardcoded ACCOUNT_MAP fallback"
+            )
+        return None, None, f"No mapping for PG account: {pg_account}"
+
+    # 3. account_type column unavailable — hardcoded fallback
+    mapping = ACCOUNT_MAP.get(pg_account)
+    if not mapping:
+        return None, None, f"No mapping for PG account: {pg_account}"
+    return mapping[0], mapping[1], warn
 
 
 def get_pg_conn():
@@ -53,33 +139,46 @@ async def index():
 
 @app.get("/api/accounts")
 async def get_accounts():
-    pg_accounts = []
-    try:
-        conn = get_pg_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT account_name FROM transactions ORDER BY account_name")
-        pg_accounts = [row["account_name"] for row in cur.fetchall()]
-        cur.close()
-        conn.close()
-    except Exception as e:
-        return {"error": f"PG error: {e}", "pg_accounts": [], "bean_accounts": [], "mappings": {}}
+    # Try to fetch (account_name, account_type) pairs; fall back to name-only.
+    pairs, type_warning = fetch_pg_account_types()
+    if pairs is not None:
+        pg_accounts = sorted({p["account_name"] for p in pairs})
+        pg_account_pairs = pairs
+    else:
+        # Fallback: account_type column missing — just list account names
+        pg_account_pairs = None
+        try:
+            conn = get_pg_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT account_name FROM transactions ORDER BY account_name")
+            pg_accounts = [row["account_name"] for row in cur.fetchall()]
+            cur.close()
+            conn.close()
+        except Exception as e:
+            return {"error": f"PG error: {e}", "pg_accounts": [], "bean_accounts": [], "mappings": {}}
 
+    # Discover ALL Beancount accounts across all roots (not just Liabilities:CreditCard:)
     bean_accounts = []
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
-        cur.execute("SELECT DISTINCT account FROM postings WHERE account ~ 'Liabilities:CreditCard:' ORDER BY account")
+        cur.execute("SELECT DISTINCT account FROM postings ORDER BY account")
         bean_accounts = [row[0] for row in cur.fetchall()]
         cur.close()
         bconn.close()
     except Exception as e:
         return {"error": f"Bean error: {e}", "pg_accounts": pg_accounts, "bean_accounts": [], "mappings": {}}
 
-    return {
+    resp = {
         "pg_accounts": pg_accounts,
         "bean_accounts": bean_accounts,
         "mappings": ACCOUNT_MAP,
     }
+    if pg_account_pairs is not None:
+        resp["pg_account_pairs"] = pg_account_pairs
+    if type_warning:
+        resp["warning"] = type_warning
+    return resp
 
 
 @app.post("/api/reconcile")
@@ -97,10 +196,10 @@ async def reconcile(body: dict[str, Any]):
     if pg_account in ("Loading...", "No accounts found", ""):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
-    mapping = ACCOUNT_MAP.get(pg_account)
-    if not mapping:
-        return {"error": f"No mapping for PG account: {pg_account}"}
-    bean_account_regex, sign_mult = mapping
+    account_type = body.get("account_type")  # optional — sent by frontend when known
+    bean_account_regex, sign_mult, map_warning = resolve_mapping(pg_account, account_type)
+    if bean_account_regex is None:
+        return {"error": map_warning or f"No mapping for PG account: {pg_account}"}
 
     # Column mappings
     col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
@@ -315,7 +414,10 @@ async def reconcile(body: dict[str, Any]):
         "bean_only": sum(1 for r in results if r["status"] == "BEAN_ONLY"),
     }
 
-    return {"summary": summary, "results": results}
+    resp = {"summary": summary, "results": results}
+    if map_warning:
+        resp["warning"] = map_warning
+    return resp
 
 
 @app.get("/api/export")
@@ -323,6 +425,7 @@ async def export_csv(
     date_from: str = Query("2025-01-01"),
     date_to: str = Query("2025-01-31"),
     pg_account: str = Query("BarclaysPersonal"),
+    account_type: str | None = Query(None),
     tolerance: float = Query(0.01),
 ):
     # Re-run reconciliation to get fresh data
@@ -334,6 +437,8 @@ async def export_csv(
         "columns": ["date", "payee", "amount"],
         "group_by": "date,payee",
     }
+    if account_type:
+        body["account_type"] = account_type
     result = await reconcile(body)
     if "error" in result:
         return {"error": result["error"]}
@@ -368,9 +473,10 @@ async def import_bean_only(body: dict[str, Any]):
     if not pg_account or not records:
         return {"error": "pg_account and records required"}
 
-    bean_account, sign_mult = ACCOUNT_MAP.get(pg_account, (None, 1))
+    account_type = body.get("account_type")  # optional — sent by frontend when known
+    bean_account, sign_mult, _warn = resolve_mapping(pg_account, account_type)
     if not bean_account:
-        return {"error": f"Unknown account: {pg_account}"}
+        return {"error": _warn or f"Unknown account: {pg_account}"}
 
     imported = 0
     skipped = 0
@@ -428,16 +534,16 @@ async def import_bean_only(body: dict[str, Any]):
 @app.get("/api/debug")
 async def debug_endpoint(
     account_name: str = Query("BarclaysPersonal"),
+    account_type: str | None = Query(None),
     date_from: str = Query("2025-01-01"),
     date_to: str = Query("2025-01-31"),
 ):
     if account_name in ("Loading...", "No accounts found", ""):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
-    mapping = ACCOUNT_MAP.get(account_name)
-    if not mapping:
-        return {"error": f"No mapping for PG account: {account_name}"}
-    bean_account_regex, sign_mult = mapping
+    bean_account_regex, sign_mult, map_warning = resolve_mapping(account_name, account_type)
+    if bean_account_regex is None:
+        return {"error": map_warning or f"No mapping for PG account: {account_name}"}
 
     pg_rows = []
     pg_error = None
@@ -510,6 +616,8 @@ async def debug_endpoint(
         "bean_rows": bean_rows,
         "bean_count": len(bean_rows),
     }
+    if map_warning:
+        result["warning"] = map_warning
     if pg_error:
         result["pg_error"] = pg_error
     if bean_error:
