@@ -216,14 +216,19 @@ async def reconcile(body: dict[str, Any]):
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        query = """
+        where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
+        params = [pg_account, date_from, date_to]
+        if account_type:
+            where_clause += " AND account_type = %s"
+            params.append(account_type)
+        query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
             FROM transactions
-            WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
+            WHERE {where_clause}
             ORDER BY transaction_date, payee
         """
-        cur.execute(query, (pg_account, date_from, date_to))
+        cur.execute(query, tuple(params))
         for row in cur.fetchall():
             amount = Decimal(str(row["amount"]))
             key_dict = {
@@ -547,18 +552,23 @@ async def debug_endpoint(
 
     pg_rows = []
     pg_error = None
-    query = """
+    where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
+    params = [account_name, date_from, date_to]
+    if account_type:
+        where_clause += " AND account_type = %s"
+        params.append(account_type)
+    query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
             FROM transactions
-            WHERE account_name = %s AND transaction_date >= %s AND transaction_date < %s
+            WHERE {where_clause}
             ORDER BY transaction_date, payee
         """
     try:
         conn = get_pg_conn()
         try:
             cur = conn.cursor()
-            cur.execute(query, (account_name, date_from, date_to))
+            cur.execute(query, tuple(params))
             for row in cur.fetchall():
                 clean_row = {}
                 for k, v in row.items():
@@ -608,8 +618,9 @@ async def debug_endpoint(
         bean_error = f"Bean query failed: {e}"
 
     result = {
+        "account_type": account_type,
         "pg_query": query.strip(),
-        "pg_params": [account_name, date_from, date_to],
+        "pg_params": params,
         "pg_rows": pg_rows,
         "pg_count": len(pg_rows),
         "bean_query": bean_query.strip(),

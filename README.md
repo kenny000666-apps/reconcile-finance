@@ -60,11 +60,14 @@ Amount matching between PostgreSQL and Beancount uses a configurable tolerance (
 
 - **Default**: `0.01` (one cent)
 - **Configurable via**: the `tolerance` field in the `/api/reconcile` request body and the `/api/export` query parameter
-- **Comparison rule**: if `|pg_amount - bean_amount| ≤ tolerance` the row is classified `MATCH`; if the absolute diff is `> tolerance` the row is classified `MISMATCH`
+- **Comparison rules**:
+  - **Pass A (external_id match)**: uses `abs(|pg| - |bean|) <= tolerance` (compares absolute values so sign conventions across data sources do not cause false mismatches).
+  - **Pass B (date,payee composite)**: uses `|pg - bean| <= tolerance` (signed difference comparison on aggregated amounts).
+  - If the computed difference is `<= tolerance`, the row is classified `MATCH`; otherwise it is classified `MISMATCH`.
 
 ## Known Limitations
 
 - **Dynamic account mapping with hardcoded fallback**: when the PG `transactions` table exposes an `account_type` column, the app builds a **root-agnostic** Beancount regex from `(account_type, account_name)` — `.*:<Type>:<AccountName>` with both fields regex-escaped — and derives the sign multiplier from the type (`-1` for `CreditCard`, `+1` otherwise). When `account_type` is **not** available (older schema), the app falls back to the hardcoded `ACCOUNT_MAP` in `app.py` and surfaces a `warning` field in API responses. Adding support for a brand-new PG account type still requires no code change as long as `account_type` is present.
-- **One PG account can span multiple Beancount roots**: a single PG `account_name` (e.g. `BarclaysPersonal`) can appear under several Beancount roots at once — for example `Liabilities:CreditCard:BarclaysPersonal`, `Assets:Current:BarclaysPersonal` and `Assets:Savings:BarclaysPersonal`. The dynamic regex `.*:<Type>:<AccountName>` intentionally matches the account under **any** root, so all matching roots are reconciled together. When the hardcoded `ACCOUNT_MAP` fallback is in effect, only ONE root is reconciled and PG rows belonging to other roots will appear as `PG_ONLY`.
+- **Accounts spanning multiple types**: the regex `.*:<Type>:<AccountName>` reconciles ONE account type at a time. A single PG `account_name` (e.g. `BarclaysPersonal`) that spans multiple types (e.g. `Liabilities:CreditCard:BarclaysPersonal`, `Assets:Current:BarclaysPersonal`, `Assets:Savings:BarclaysPersonal`) cannot be reconciled in a single pass — accounts spanning multiple types require separate reconciliation runs per `(account_name, account_type)` pair. PG queries filter with `AND account_type = %s` when `account_type` is provided to prevent cross-type pollution. When the hardcoded `ACCOUNT_MAP` fallback is in effect, only ONE root is reconciled and PG rows belonging to other roots will appear as `PG_ONLY`.
 - **Account discovery**: `/api/accounts` lists all Beancount accounts across every root (no longer restricted to `Liabilities:CreditCard:`) and, when the PG schema supports it, returns distinct `(account_name, account_type)` pairs used to populate the dropdown as `Name (Type)`.
 

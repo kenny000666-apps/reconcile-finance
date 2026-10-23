@@ -30,10 +30,12 @@
 - **How**: Code review and static analysis of `app.py` and `static/index.html`, limited to the read-only endpoints above.
 - **Expected Result**: Only `SELECT` statements are executed against PostgreSQL and Beancount on the read-only paths, and connections are safely closed in `finally` blocks.
 
-## 7. Multi-root Account Reconciliation
-- **What**: Verify the documented limitation that a single PG `account_name` (e.g. `BarclaysPersonal`) can map to multiple Beancount roots (`Liabilities:CreditCard:…`, `Assets:Current:…`, `Assets:Savings:…`), and that the current implementation only queries ONE root (the one in `ACCOUNT_MAP`).
-- **How**: Run `/api/debug?account_name=BarclaysPersonal` and inspect the generated BQL query string. Confirm the regex matches only the single Beancount root from `ACCOUNT_MAP`. Cross-check by running a manual BQL query against the other roots to confirm PG rows exist that belong to those roots.
-- **Expected Result**: The user understands that only the mapped Beancount root is queried; PG rows that logically belong to other roots (e.g. `Assets:Current:BarclaysPersonal`) will appear as `PG_ONLY` in the reconciliation output.
+## 7. Account Mapping Resolution (`resolve_mapping`)
+- **What**: Verify `resolve_mapping` behavior when `account_type` is provided vs absent.
+- **How**: Test `resolve_mapping("BarclaysPersonal", "CreditCard")` and `resolve_mapping("BarclaysPersonal", None)`:
+  1. When `account_type` exists: verify BQL regex is root-agnostic `.*:<Type>:<AccountName>` (e.g. `.*:CreditCard:BarclaysPersonal`), sign multiplier is derived correctly (`-1` for CreditCard, `1` otherwise), and warning is `None`.
+  2. When `account_type` is absent: verify fallback to hardcoded `ACCOUNT_MAP` with an appropriate warning returned.
+- **Expected Result**: Matching BQL regex matches only the specific account type under any root; missing `account_type` falls back gracefully to `ACCOUNT_MAP`.
 
 ## 8. /api/import Write Behavior
 - **What**: Verify the `/api/import` endpoint correctly inserts `BEAN_ONLY` reconciliation records into the PostgreSQL `transactions` table.
@@ -45,3 +47,13 @@
   - First call inserts the rows using `INSERT ... ON CONFLICT (external_id) DO NOTHING` and returns `imported > 0, skipped = 0`.
   - `external_id` generation for rows missing one is deterministic — derived from a `sha256` hash of `date|payee|amount|bean_account`, truncated to 16 chars, and prefixed with `bean-import-`.
   - Second call with the same payload returns `skipped > 0, imported = 0` (no duplicates created).
+
+## 9. PG Type Filter
+- **What**: Verify that when `account_type` is provided, PG queries include `AND account_type = %s` in the `WHERE` clause and return only matching rows.
+- **How**:
+  1. Call `GET /api/debug?account_name=BarclaysPersonal&account_type=CreditCard`.
+  2. Inspect `pg_query` and `pg_params` in the JSON response.
+  3. Verify `pg_query` contains `AND account_type = %s`.
+  4. Verify `pg_params` includes `CreditCard` as a parameter.
+  5. Check `account_type` is returned in the debug JSON response.
+- **Expected Result**: The PG query cleanly filters by `account_type`, preventing cross-type row pollution (e.g. excluding Current or Savings rows when reconciling CreditCard).
