@@ -37,14 +37,29 @@ ACCOUNT_MAP = {
 VALID_ACCOUNT_TYPES = ("Current", "CreditCard", "Savings", "Income")
 
 
+def extract_bean_type(bean_account: str) -> str:
+    """Extract the type segment from a Beancount account path.
+
+    Examples:
+        Liabilities:CreditCard:BarclaysPersonal → CreditCard
+        Assets:Current:Revolut → Current
+        Assets:Savings:ZopaBank → Savings
+        Expenses:Food:Groceries → Food
+    """
+    parts = bean_account.split(':')
+    if len(parts) >= 2:
+        return parts[1]  # Second segment is the type
+    return 'Unknown'
+
+
 def _build_bean_regex(account_type: str, account_name: str) -> str:
-    """Build a root-agnostic BQL account regex from PG (account_type, account_name).
+    """Build a root-agnostic BQL account regex from (account_type, account_name).
 
     Matches the account under ANY Beancount root, e.g.
     ('CreditCard', 'BarclaysPersonal') -> '.*:CreditCard:BarclaysPersonal'
     which matches Liabilities:CreditCard:BarclaysPersonal.
     """
-    return ".*:" + re.escape(account_type) + ":" + re.escape(account_name)
+    return f".*:{re.escape(account_type)}:{re.escape(account_name)}"
 
 
 def _sign_for_type(account_type: str) -> int:
@@ -143,6 +158,29 @@ async def index():
         return HTMLResponse(content=f.read())
 
 
+@app.get("/api/account-types")
+async def get_account_types():
+    """Return distinct Beancount-derived account types with counts."""
+    bean_types = []
+    try:
+        bconn = get_bean_conn()
+        cur = bconn.cursor()
+        # Query all accounts, extract type from path
+        cur.execute("SELECT DISTINCT account FROM postings ORDER BY account")
+        type_counts = {}
+        for row in cur.fetchall():
+            account = row[0]
+            bean_type = extract_bean_type(account)
+            type_counts[bean_type] = type_counts.get(bean_type, 0) + 1
+        cur.close()
+        bconn.close()
+        bean_types = [{"type": t, "count": c} for t, c in sorted(type_counts.items())]
+    except Exception as e:
+        return {"error": f"Bean query failed: {e}", "types": []}
+
+    return {"types": bean_types}
+
+
 @app.get("/api/accounts")
 async def get_accounts():
     # Try to fetch (account_name, account_type) pairs; fall back to name-only.
@@ -163,17 +201,26 @@ async def get_accounts():
         except Exception as e:
             return {"error": f"PG error: {e}", "pg_accounts": [], "bean_accounts": [], "mappings": {}}
 
-    # Discover ALL Beancount accounts across all roots (not just Liabilities:CreditCard:)
+    # Query Beancount accounts with their derived types
     bean_accounts = []
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
         cur.execute("SELECT DISTINCT account FROM postings ORDER BY account")
-        bean_accounts = [row[0] for row in cur.fetchall()]
+        for row in cur.fetchall():
+            account = row[0]
+            bean_type = extract_bean_type(account)
+            # Extract account_name (last segment)
+            account_name = account.split(':')[-1]
+            bean_accounts.append({
+                "account": account,
+                "account_name": account_name,
+                "type": bean_type
+            })
         cur.close()
         bconn.close()
     except Exception as e:
-        return {"error": f"Bean error: {e}", "pg_accounts": pg_accounts, "bean_accounts": [], "mappings": {}}
+        return {"error": f"Bean error: {e}", "pg_accounts": pg_accounts, "bean_accounts": [], "mappings": ACCOUNT_MAP}
 
     resp = {
         "pg_accounts": pg_accounts,
@@ -202,7 +249,7 @@ async def reconcile(body: dict[str, Any]):
     if pg_account in ("Loading...", "No accounts found", ""):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
-    account_type = body.get("account_type")  # optional — sent by frontend when known
+    account_type = body.get("account_type") or None  # optional — sent by frontend when known
     if account_type and account_type not in VALID_ACCOUNT_TYPES:
         return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
     bean_account_regex, sign_mult, map_warning = resolve_mapping(pg_account, account_type)
@@ -445,6 +492,7 @@ async def export_csv(
     account_type: str | None = Query(None),
     tolerance: float = Query(0.01),
 ):
+    account_type = account_type or None
     if account_type and account_type not in VALID_ACCOUNT_TYPES:
         return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
 
@@ -493,7 +541,7 @@ async def import_bean_only(body: dict[str, Any]):
     if not pg_account or not records:
         return {"error": "pg_account and records required"}
 
-    account_type = body.get("account_type")  # optional — sent by frontend when known
+    account_type = body.get("account_type") or None  # optional — sent by frontend when known
     if account_type and account_type not in VALID_ACCOUNT_TYPES:
         return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
     bean_account, sign_mult, _warn = resolve_mapping(pg_account, account_type)
@@ -560,6 +608,8 @@ async def debug_endpoint(
     date_from: str = Query("2025-01-01"),
     date_to: str = Query("2025-01-31"),
 ):
+    account_type = account_type or None
+
     if account_name in ("Loading...", "No accounts found", ""):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
