@@ -24,7 +24,7 @@ PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 
 # Account mapping: PG account name -> (bean account regex, sign multiplier)
-# Used as a fallback when the PG transactions table has no account_type column.
+# Used as a fallback when the PG transactions table has no type column.
 ACCOUNT_MAP = {
     "AmericanExpress": ("Liabilities:CreditCard:AmericanExpress", -1),
     "BarclaysPersonal": ("Liabilities:CreditCard:BarclaysPersonal", -1),
@@ -33,6 +33,8 @@ ACCOUNT_MAP = {
     "ZopaBank": ("Assets:Current:ZopaBank", 1),
     "Discover": ("Liabilities:CreditCard:Discover", -1),
 }
+
+VALID_ACCOUNT_TYPES = ("Current", "CreditCard", "Savings", "Income")
 
 
 def _build_bean_regex(account_type: str, account_name: str) -> str:
@@ -62,7 +64,8 @@ def fetch_pg_account_types():
         conn = get_pg_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT DISTINCT account_name, account_type FROM transactions "
+            "SELECT DISTINCT account_name, type AS account_type FROM transactions "
+            "WHERE type IN ('Current', 'CreditCard', 'Savings', 'Income') "
             "ORDER BY account_name, account_type"
         )
         pairs = [
@@ -73,7 +76,7 @@ def fetch_pg_account_types():
         return pairs, None
     except Exception as e:
         return None, (
-            f"account_type column not available in PG transactions table "
+            f"type column not available in PG transactions table "
             f"({e}); falling back to hardcoded ACCOUNT_MAP"
         )
     finally:
@@ -94,6 +97,8 @@ def resolve_mapping(pg_account: str, account_type: str | None = None):
     """
     # 1. Caller supplied account_type directly (frontend sends it when known)
     if account_type:
+        if account_type not in VALID_ACCOUNT_TYPES:
+            return None, None, f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"
         return _build_bean_regex(account_type, pg_account), _sign_for_type(account_type), None
 
     # 2. Try to discover account_type from PG for this account_name
@@ -102,7 +107,8 @@ def resolve_mapping(pg_account: str, account_type: str | None = None):
         for p in pairs:
             if p["account_name"] == pg_account:
                 at = p["account_type"]
-                return _build_bean_regex(at, pg_account), _sign_for_type(at), None
+                if at in VALID_ACCOUNT_TYPES:
+                    return _build_bean_regex(at, pg_account), _sign_for_type(at), None
         # account_name not found in PG at all — fall through to hardcoded map
         mapping = ACCOUNT_MAP.get(pg_account)
         if mapping:
@@ -112,7 +118,7 @@ def resolve_mapping(pg_account: str, account_type: str | None = None):
             )
         return None, None, f"No mapping for PG account: {pg_account}"
 
-    # 3. account_type column unavailable — hardcoded fallback
+    # 3. type column unavailable — hardcoded fallback
     mapping = ACCOUNT_MAP.get(pg_account)
     if not mapping:
         return None, None, f"No mapping for PG account: {pg_account}"
@@ -197,6 +203,8 @@ async def reconcile(body: dict[str, Any]):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
     account_type = body.get("account_type")  # optional — sent by frontend when known
+    if account_type and account_type not in VALID_ACCOUNT_TYPES:
+        return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
     bean_account_regex, sign_mult, map_warning = resolve_mapping(pg_account, account_type)
     if bean_account_regex is None:
         return {"error": map_warning or f"No mapping for PG account: {pg_account}"}
@@ -219,8 +227,12 @@ async def reconcile(body: dict[str, Any]):
         where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
         params = [pg_account, date_from, date_to]
         if account_type:
-            where_clause += " AND account_type = %s"
+            where_clause += " AND type = %s"
             params.append(account_type)
+        else:
+            clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
+            where_clause += f" AND type IN ({clean_placeholders})"
+            params.extend(VALID_ACCOUNT_TYPES)
         query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
@@ -433,6 +445,9 @@ async def export_csv(
     account_type: str | None = Query(None),
     tolerance: float = Query(0.01),
 ):
+    if account_type and account_type not in VALID_ACCOUNT_TYPES:
+        return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
+
     # Re-run reconciliation to get fresh data
     body = {
         "date_from": date_from,
@@ -479,6 +494,8 @@ async def import_bean_only(body: dict[str, Any]):
         return {"error": "pg_account and records required"}
 
     account_type = body.get("account_type")  # optional — sent by frontend when known
+    if account_type and account_type not in VALID_ACCOUNT_TYPES:
+        return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
     bean_account, sign_mult, _warn = resolve_mapping(pg_account, account_type)
     if not bean_account:
         return {"error": _warn or f"Unknown account: {pg_account}"}
@@ -546,6 +563,9 @@ async def debug_endpoint(
     if account_name in ("Loading...", "No accounts found", ""):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
+    if account_type and account_type not in VALID_ACCOUNT_TYPES:
+        return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
+
     bean_account_regex, sign_mult, map_warning = resolve_mapping(account_name, account_type)
     if bean_account_regex is None:
         return {"error": map_warning or f"No mapping for PG account: {account_name}"}
@@ -555,8 +575,12 @@ async def debug_endpoint(
     where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
     params = [account_name, date_from, date_to]
     if account_type:
-        where_clause += " AND account_type = %s"
+        where_clause += " AND type = %s"
         params.append(account_type)
+    else:
+        clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
+        where_clause += f" AND type IN ({clean_placeholders})"
+        params.extend(VALID_ACCOUNT_TYPES)
     query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
