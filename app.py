@@ -573,6 +573,15 @@ async def import_bean_only(body: dict[str, Any]):
                 h = hashlib.sha256(f"{date_val}|{payee}|{raw_amount}|{bean_account}".encode()).hexdigest()[:16]
                 external_id = f"bean-import-{h}"
             try:
+                # Check for existing duplicate scoped to this account
+                cur.execute(
+                    "SELECT 1 FROM transactions WHERE external_id = %s AND account_name = %s",
+                    (external_id, pg_account),
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+
                 cur.execute(
                     """INSERT INTO transactions
                        (external_id, transaction_date, account_name, type, amount,
