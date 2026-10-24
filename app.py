@@ -34,22 +34,18 @@ ACCOUNT_MAP = {
     "Discover": ("Liabilities:CreditCard:Discover", -1),
 }
 
-VALID_ACCOUNT_TYPES = ("Current", "CreditCard", "Savings", "Income")
+VALID_ACCOUNT_TYPES = {
+    "Current", "Savings", "CreditCard", "Loan", "Mortgage",
+    "Pension", "Income", "Investment", "Cash", "Suspended", "Fixed",
+}
 
 
-def extract_bean_type(bean_account: str) -> str:
-    """Extract the type segment from a Beancount account path.
-
-    Examples:
-        Liabilities:CreditCard:BarclaysPersonal → CreditCard
-        Assets:Current:Revolut → Current
-        Assets:Savings:ZopaBank → Savings
-        Expenses:Food:Groceries → Food
-    """
-    parts = bean_account.split(':')
-    if len(parts) >= 2:
-        return parts[1]  # Second segment is the type
-    return 'Unknown'
+def extract_bean_type(bean_account: str) -> str | None:
+    """Extract account type from beancount path (e.g., 'Assets:Current:Barclays' -> 'Current')."""
+    parts = bean_account.split(":")
+    if len(parts) >= 2 and parts[0] in ("Assets", "Liabilities") and parts[1] in VALID_ACCOUNT_TYPES:
+        return parts[1]
+    return None
 
 
 def _build_bean_regex(account_type: str, account_name: str) -> str:
@@ -78,10 +74,12 @@ def fetch_pg_account_types():
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
+        clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
         cur.execute(
-            "SELECT DISTINCT account_name, type AS account_type FROM transactions "
-            "WHERE type IN ('Current', 'CreditCard', 'Savings', 'Income') "
-            "ORDER BY account_name, account_type"
+            f"SELECT DISTINCT account_name, type AS account_type FROM transactions "
+            f"WHERE type IN ({clean_placeholders}) "
+            f"ORDER BY account_name, account_type",
+            tuple(sorted(VALID_ACCOUNT_TYPES)),
         )
         pairs = [
             {"account_name": row["account_name"], "account_type": row["account_type"]}
@@ -171,7 +169,8 @@ async def get_account_types():
         for row in cur.fetchall():
             account = row[0]
             bean_type = extract_bean_type(account)
-            type_counts[bean_type] = type_counts.get(bean_type, 0) + 1
+            if bean_type:
+                type_counts[bean_type] = type_counts.get(bean_type, 0) + 1
         cur.close()
         bconn.close()
         bean_types = [{"type": t, "count": c} for t, c in sorted(type_counts.items())]
@@ -210,6 +209,8 @@ async def get_accounts():
         for row in cur.fetchall():
             account = row[0]
             bean_type = extract_bean_type(account)
+            if not bean_type:
+                continue
             # Extract account_name (last segment)
             account_name = account.split(':')[-1]
             bean_accounts.append({
@@ -279,7 +280,7 @@ async def reconcile(body: dict[str, Any]):
         else:
             clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
             where_clause += f" AND type IN ({clean_placeholders})"
-            params.extend(VALID_ACCOUNT_TYPES)
+            params.extend(sorted(VALID_ACCOUNT_TYPES))
         query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
@@ -630,7 +631,7 @@ async def debug_endpoint(
     else:
         clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
         where_clause += f" AND type IN ({clean_placeholders})"
-        params.extend(VALID_ACCOUNT_TYPES)
+        params.extend(sorted(VALID_ACCOUNT_TYPES))
     query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
