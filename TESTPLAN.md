@@ -75,3 +75,41 @@
   3. Verify that these rows are not present in `pg_rows` and do not contribute to `pg_count` or reconciliation status counts.
   4. Verify that requests supplying an invalid `account_type` parameter (e.g. `account_type=credit` or `account_type=debit`) are rejected with an explicit error.
 - **Expected Result**: Only transactions with `type` in `VALID_ACCOUNT_TYPES` (`Current`, `CreditCard`, `Savings`, `Income`) are included in reconciliation; contaminated rows are safely excluded.
+
+## 12. Beancount-Derived Account Types Endpoint
+- **What**: Verify `/api/account-types` returns distinct Beancount-derived types with counts extracted from account paths.
+- **How**:
+  1. Call `GET /api/account-types`.
+  2. Inspect the response payload: verify `types` is a list of objects with `type` and `count` keys.
+  3. Verify known types from ledger (e.g. `CreditCard`, `Current`, `Savings`) are returned sorted by type.
+- **Expected Result**: Distinct Beancount account types are returned with their posting counts; if ledger query fails, `error` string and empty `types` array are returned without crashing.
+
+## 13. Structured Beancount Accounts in `/api/accounts`
+- **What**: Verify `/api/accounts` returns `bean_accounts` as a list of structured objects containing `{account, account_name, type}`.
+- **How**:
+  1. Call `GET /api/accounts`.
+  2. Inspect `bean_accounts` in the response JSON.
+  3. Verify each entry is an object containing `account` (full path, e.g. `Liabilities:CreditCard:BarclaysPersonal`), `account_name` (leaf name, e.g. `BarclaysPersonal`), and `type` (second segment, e.g. `CreditCard`).
+  4. Verify existing fields `pg_accounts` and `mappings` remain intact for backward compatibility.
+- **Expected Result**: `bean_accounts` contains `{account, account_name, type}` objects derived from Beancount postings.
+
+## 14. BQL Regex with Explicit `account_type` Parameter
+- **What**: Verify `/api/reconcile` and `/api/debug` accept the `account_type` parameter and construct the precise BQL account regex `.*:<type>:<account_name>`.
+- **How**:
+  1. Call `GET /api/debug?account_name=BarclaysPersonal&account_type=CreditCard`.
+  2. Inspect `bean_query` in the JSON response.
+  3. Verify the WHERE clause specifies `account ~ '.*:CreditCard:BarclaysPersonal'`.
+  4. Call `POST /api/reconcile` with `{"pg_account": "BarclaysPersonal", "account_type": "CreditCard"}` and confirm successful execution.
+  5. Call `GET /api/debug?account_name=BarclaysPersonal` (without `account_type`) and verify fallback logic is invoked.
+- **Expected Result**: Explicit `account_type` parameter builds the exact root-agnostic regex `.*:<type>:<account_name>`, while omitting it falls back cleanly to PG type discovery or `ACCOUNT_MAP`.
+
+## 15. UI Dual-Dropdown Selection Behavior
+- **What**: Verify the web UI provides two dropdowns (Account Type and Account Name) with dynamic filtering and visual indicator.
+- **How**:
+  1. Load the web interface at `/`.
+  2. Verify the "Account Type" dropdown is populated from `/api/account-types` with "All Types" default.
+  3. Verify the "Account Name" dropdown is populated from `/api/accounts`.
+  4. Select a specific Type (e.g. `CreditCard`) and verify the Account Name dropdown updates to show only accounts of that type.
+  5. Select an account and verify the selection badge displays the active `(type, account_name)` pair.
+  6. Click "Reconcile" or "Debug" and verify both `account_type` and `pg_account`/`account_name` parameters are dispatched.
+- **Expected Result**: User can filter by type or leave "All Types"; both selections are reflected in the UI and transmitted to reconciliation endpoints.
