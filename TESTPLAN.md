@@ -49,11 +49,29 @@
   - Second call with the same payload returns `skipped > 0, imported = 0` (no duplicates created).
 
 ## 9. PG Type Filter
-- **What**: Verify that when `account_type` is provided, PG queries include `AND account_type = %s` in the `WHERE` clause and return only matching rows.
+- **What**: Verify that when `account_type` is provided, PG queries include `AND type = %s` in the `WHERE` clause and return only matching rows.
 - **How**:
   1. Call `GET /api/debug?account_name=BarclaysPersonal&account_type=CreditCard`.
   2. Inspect `pg_query` and `pg_params` in the JSON response.
-  3. Verify `pg_query` contains `AND account_type = %s`.
+  3. Verify `pg_query` contains `AND type = %s`.
   4. Verify `pg_params` includes `CreditCard` as a parameter.
   5. Check `account_type` is returned in the debug JSON response.
-- **Expected Result**: The PG query cleanly filters by `account_type`, preventing cross-type row pollution (e.g. excluding Current or Savings rows when reconciling CreditCard).
+- **Expected Result**: The PG query cleanly filters by `type`, preventing cross-type row pollution (e.g. excluding Current or Savings rows when reconciling CreditCard).
+
+## 10. PG Query Uses `type` Column (not `account_type`)
+- **What**: Verify that all PostgreSQL queries reference the actual database column `type` and not `account_type`.
+- **How**:
+  1. Call `GET /api/debug?account_name=BarclaysPersonal&account_type=CreditCard`.
+  2. Inspect the returned `pg_query` string in the JSON response.
+  3. Verify the WHERE clause specifies `AND type = %s` (or `type IN (...)`) and contains no occurrence of `account_type = %s`.
+  4. Call `GET /api/accounts` and verify `fetch_pg_account_types()` issues `SELECT DISTINCT account_name, type AS account_type FROM transactions WHERE type IN (...)`.
+- **Expected Result**: Queries execute without column-not-found errors against the PostgreSQL `transactions` table.
+
+## 11. Contaminated Rows Exclusion (`credit` / `debit`)
+- **What**: Verify that rows with contaminated or non-standard `type` values (e.g. `credit`, `debit`, typos) are excluded from reconciliation counts.
+- **How**:
+  1. In PostgreSQL, identify or insert rows with `type = 'credit'` (Amex) or `type = 'debit'` (Barclays).
+  2. Call `/api/reconcile` and `/api/debug` for the respective accounts.
+  3. Verify that these rows are not present in `pg_rows` and do not contribute to `pg_count` or reconciliation status counts.
+  4. Verify that requests supplying an invalid `account_type` parameter (e.g. `account_type=credit` or `account_type=debit`) are rejected with an explicit error.
+- **Expected Result**: Only transactions with `type` in `VALID_ACCOUNT_TYPES` (`Current`, `CreditCard`, `Savings`, `Income`) are included in reconciliation; contaminated rows are safely excluded.
