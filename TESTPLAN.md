@@ -113,3 +113,15 @@
   5. Select an account and verify the selection badge displays the active `(type, account_name)` pair.
   6. Click "Reconcile" or "Debug" and verify both `account_type` and `pg_account`/`account_name` parameters are dispatched.
 - **Expected Result**: User can filter by type or leave "All Types"; both selections are reflected in the UI and transmitted to reconciliation endpoints.
+
+## 16. Account-Scoped Duplicate Check on Import
+- **What**: Verify `/api/import` scopes duplicate detection to `(external_id, account_name)`.
+- **How**:
+  1. POST a record with `external_id="ext-123"` to `/api/import` under `pg_account="BarclaysPersonal"`.
+  2. POST a record with the same `external_id="ext-123"` to `/api/import` under a different account `pg_account="AmericanExpress"`.
+  3. POST the record again under `pg_account="BarclaysPersonal"`.
+- **Expected Result**:
+  - The duplicate check query `SELECT 1 FROM transactions WHERE external_id = %s AND account_name = %s` is scoped to the target account.
+  - An existing `external_id` under a different account is not treated as a duplicate in application logic.
+  - Submitting the same `external_id` for the same account is identified as a duplicate and skipped (`skipped += 1`).
+
