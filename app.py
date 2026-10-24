@@ -49,13 +49,14 @@ def extract_bean_type(bean_account: str) -> str | None:
 
 
 def _build_bean_regex(account_type: str, account_name: str) -> str:
-    """Build a root-agnostic BQL account regex from (account_type, account_name).
+    """Build a balance-sheet BQL account regex from (account_type, account_name).
 
-    Matches the account under ANY Beancount root, e.g.
-    ('CreditCard', 'BarclaysPersonal') -> '.*:CreditCard:BarclaysPersonal'
-    which matches Liabilities:CreditCard:BarclaysPersonal.
+    Matches the account under Assets: or Liabilities: roots only, e.g.
+    ('CreditCard', 'BarclaysPersonal') -> '(Assets|Liabilities):CreditCard:BarclaysPersonal'
+    which matches Liabilities:CreditCard:BarclaysPersonal while excluding
+    expense/income legs like Expenses:Unattributed:CreditCard:BarclaysPersonal.
     """
-    return f".*:{re.escape(account_type)}:{re.escape(account_name)}"
+    return f"(Assets|Liabilities):{re.escape(account_type)}:{re.escape(account_name)}"
 
 
 def _sign_for_type(account_type: str) -> int:
@@ -104,7 +105,7 @@ def resolve_mapping(pg_account: str, account_type: str | None = None):
     """Resolve (bean_regex, sign_mult, warning) for a PG account.
 
     Preference order:
-      1. Explicit (pg_account, account_type) -> root-agnostic regex
+      1. Explicit (pg_account, account_type) -> (Assets|Liabilities) regex
       2. Lookup of account_type from live PG query (per account_name)
       3. Hardcoded ACCOUNT_MAP fallback (with warning)
     """
