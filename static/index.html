@@ -130,9 +130,19 @@
     <label>Date To</label>
     <input type="date" id="dateTo" value="2025-01-31">
   </div>
-  <div class="control-group">
-    <label>PG Account</label>
-    <select id="pgAccount"><option>Loading...</option></select>
+  <div class="control-group form-group">
+    <label for="account-type">Account Type:</label>
+    <select id="account-type" onchange="onTypeChange()">
+      <option value="">All Types</option>
+      <!-- populated from /api/account-types -->
+    </select>
+  </div>
+  <div class="control-group form-group">
+    <label for="account-name">Account Name:</label>
+    <select id="account-name" onchange="onAccountChange()">
+      <option value="">Loading...</option>
+      <!-- populated from /api/accounts -->
+    </select>
   </div>
   <div class="control-group">
     <label>Tolerance</label>
@@ -152,6 +162,11 @@
   <button id="exportBtn" class="export-btn" onclick="exportCSV()" disabled>Export CSV</button>
   <button id="importBtn" style="background:#6f42c1" onclick="importBeanOnly()" disabled>Import BEAN_ONLY → PG</button>
   <button id="debugBtn" style="background:#444;" onclick="openDebugModal()" disabled>🐞 Debug</button>
+</div>
+
+<div id="selectionBadge" style="margin-bottom: 15px; font-size: 13px; color: #555; background: #fff; padding: 10px 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
+  <span><strong>Selected Account:</strong> <span id="displayAccountName" style="color:#1a73e8; font-weight:600;">(none)</span></span>
+  <span><strong>Selected Type:</strong> <span id="displayAccountType" style="color:#6f42c1; font-weight:600;">All Types</span></span>
 </div>
 
 <div id="errorBox" class="error" style="display:none"></div>
@@ -197,13 +212,17 @@ let lastParams = null;
 // === Form state persistence via localStorage ===
 const FORM_STATE_KEY = 'reconcile_form_state';
 
+let allPgAccounts = [];
+let allBeanAccounts = [];
+
 function saveFormState() {
   try {
     const columns = Array.from(document.querySelectorAll('.checkbox-group input:checked')).map(cb => cb.value);
     const state = {
       dateFrom: document.getElementById('dateFrom').value,
       dateTo: document.getElementById('dateTo').value,
-      pgAccount: document.getElementById('pgAccount').value,
+      accountType: document.getElementById('account-type').value,
+      accountName: document.getElementById('account-name').value,
       columns: columns,
       statusFilter: document.getElementById('statusFilter').value,
     };
@@ -218,31 +237,42 @@ function restoreFormState() {
     const state = JSON.parse(raw);
     if (state.dateFrom) document.getElementById('dateFrom').value = state.dateFrom;
     if (state.dateTo) document.getElementById('dateTo').value = state.dateTo;
-    // Restore PG account selection if the option exists
-    if (state.pgAccount) {
-      const sel = document.getElementById('pgAccount');
-      const optExists = Array.from(sel.options).some(o => o.value === state.pgAccount);
-      if (optExists) sel.value = state.pgAccount;
+    if (state.accountType !== undefined) {
+      const typeSel = document.getElementById('account-type');
+      if (Array.from(typeSel.options).some(o => o.value === state.accountType)) {
+        typeSel.value = state.accountType;
+        populateAccountDropdown();
+      }
     }
-    // Restore column checkboxes
+    const targetName = state.accountName || state.pgAccount;
+    if (targetName) {
+      const nameSel = document.getElementById('account-name');
+      if (Array.from(nameSel.options).some(o => o.value === targetName)) {
+        nameSel.value = targetName;
+      }
+    }
     if (state.columns && Array.isArray(state.columns)) {
       document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
         cb.checked = state.columns.includes(cb.value);
       });
     }
-    // Restore status filter
     if (state.statusFilter) {
       document.getElementById('statusFilter').value = state.statusFilter;
     }
+    updateSelectionDisplay();
   } catch(e) {}
 }
 
-// Attach change listeners for auto-save
 function attachFormListeners() {
-  ['dateFrom', 'dateTo'].forEach(id => {
-    document.getElementById(id).addEventListener('change', saveFormState);
+  ['dateFrom', 'dateTo', 'tolerance'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', saveFormState);
   });
-  document.getElementById('pgAccount').addEventListener('change', saveFormState);
+  const typeEl = document.getElementById('account-type');
+  if (typeEl) typeEl.addEventListener('change', onTypeChange);
+  const nameEl = document.getElementById('account-name');
+  if (nameEl) nameEl.addEventListener('change', onAccountChange);
+
   document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', saveFormState);
   });
@@ -251,36 +281,94 @@ function attachFormListeners() {
   });
 }
 
+function updateSelectionDisplay() {
+  const typeSel = document.getElementById('account-type');
+  const nameSel = document.getElementById('account-name');
+  const typeVal = typeSel && typeSel.value ? typeSel.value : 'All Types';
+  const nameVal = nameSel && nameSel.value ? nameSel.value : '(none)';
+  const dispName = document.getElementById('displayAccountName');
+  const dispType = document.getElementById('displayAccountType');
+  if (dispName) dispName.textContent = nameVal;
+  if (dispType) dispType.textContent = typeVal;
+}
+
+function onTypeChange() {
+  populateAccountDropdown();
+  updateSelectionDisplay();
+  saveFormState();
+}
+
+function onAccountChange() {
+  updateSelectionDisplay();
+  saveFormState();
+}
+
+function populateAccountDropdown() {
+  const typeSel = document.getElementById('account-type');
+  const selectedType = typeSel ? typeSel.value : '';
+  const nameSel = document.getElementById('account-name');
+  const prevVal = nameSel.value;
+  nameSel.innerHTML = '';
+
+  let accountsToShow = [];
+  if (selectedType) {
+    const matchingBean = allBeanAccounts.filter(b => b.type === selectedType);
+    accountsToShow = Array.from(new Set(matchingBean.map(b => b.account_name))).sort();
+  } else {
+    const set = new Set(allPgAccounts);
+    allBeanAccounts.forEach(b => { if (b.account_name) set.add(b.account_name); });
+    accountsToShow = Array.from(set).sort();
+  }
+
+  if (accountsToShow.length === 0) {
+    nameSel.innerHTML = '<option value="">No accounts found</option>';
+  } else {
+    accountsToShow.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = a;
+      nameSel.appendChild(opt);
+    });
+    if (accountsToShow.includes(prevVal)) {
+      nameSel.value = prevVal;
+    }
+  }
+}
+
+async function loadAccountTypes() {
+  try {
+    const resp = await fetch('/api/account-types');
+    const data = await resp.json();
+    const typeSel = document.getElementById('account-type');
+    typeSel.innerHTML = '<option value="">All Types</option>';
+    if (data.types && Array.isArray(data.types)) {
+      data.types.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.type;
+        opt.textContent = `${t.type} (${t.count})`;
+        typeSel.appendChild(opt);
+      });
+    }
+  } catch(e) {
+    console.warn('Failed to load account types:', e);
+  }
+}
+
 async function loadAccounts() {
   try {
     const resp = await fetch('/api/accounts');
     const data = await resp.json();
-    const sel = document.getElementById('pgAccount');
-    sel.innerHTML = '';
     if (data.warning) {
       console.warn('Account mapping warning:', data.warning);
     }
-    if (data.pg_accounts && data.pg_accounts.length > 0) {
-      // Build type lookup from pairs when available
-      const typeMap = {};
-      if (data.pg_account_pairs) {
-        data.pg_account_pairs.forEach(p => { typeMap[p.account_name] = p.account_type; });
-      }
-      data.pg_accounts.forEach(a => {
-        const opt = document.createElement('option');
-        opt.value = a;
-        const t = typeMap[a];
-        opt.textContent = t ? `${a} (${t})` : a;
-        if (t) opt.dataset.accountType = t;
-        sel.appendChild(opt);
-      });
-      document.getElementById('runBtn').disabled = false;
-      document.getElementById('debugBtn').disabled = false;
-      // Restore saved selections now that options are populated
-      restoreFormState();
-    } else {
-      sel.innerHTML = '<option>No accounts found</option>';
-    }
+    allPgAccounts = data.pg_accounts || [];
+    allBeanAccounts = data.bean_accounts || [];
+
+    populateAccountDropdown();
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('debugBtn').disabled = false;
+    restoreFormState();
+    updateSelectionDisplay();
   } catch(e) {
     document.getElementById('errorBox').textContent = 'Failed to load accounts: ' + e.message;
     document.getElementById('errorBox').style.display = 'block';
@@ -288,14 +376,18 @@ async function loadAccounts() {
 }
 
 function getSelectedAccountType() {
-  const sel = document.getElementById('pgAccount');
-  const opt = sel.options[sel.selectedIndex];
-  return opt && opt.dataset.accountType ? opt.dataset.accountType : null;
+  const sel = document.getElementById('account-type');
+  return sel && sel.value ? sel.value : null;
+}
+
+function getSelectedAccountName() {
+  const sel = document.getElementById('account-name');
+  return sel ? sel.value : '';
 }
 
 async function runReconcile() {
-  const pgAccount = document.getElementById('pgAccount').value;
-  if (!pgAccount || pgAccount === 'Loading...' || pgAccount === 'No accounts found') {
+  const accountName = getSelectedAccountName();
+  if (!accountName || accountName === 'Loading...' || accountName.startsWith('No accounts')) {
     document.getElementById('errorBox').textContent = 'Please wait for accounts to load, then select a valid account.';
     document.getElementById('errorBox').style.display = 'block';
     return;
@@ -311,7 +403,7 @@ async function runReconcile() {
   const params = {
     date_from: document.getElementById('dateFrom').value,
     date_to: document.getElementById('dateTo').value,
-    pg_account: pgAccount,
+    pg_account: accountName,
     tolerance: parseFloat(document.getElementById('tolerance').value),
     columns: columns,
     group_by: columns.join(','),
@@ -568,12 +660,16 @@ function exportCSV() {
   window.location.href = '/api/export?' + p.toString();
 }
 
-attachFormListeners();
-loadAccounts();
+async function init() {
+  attachFormListeners();
+  await loadAccountTypes();
+  await loadAccounts();
+}
+init();
 
 function openDebugModal() {
-  const pgAccount = document.getElementById('pgAccount').value;
-  if (!pgAccount || pgAccount === 'Loading...' || pgAccount === 'No accounts found') {
+  const accountName = getSelectedAccountName();
+  if (!accountName || accountName === 'Loading...' || accountName.startsWith('No accounts')) {
     alert('Please select a valid account first.');
     return;
   }
@@ -586,7 +682,7 @@ function closeDebugModal() {
 }
 
 async function fetchDebugData() {
-  const pgAccount = document.getElementById('pgAccount').value;
+  const accountName = getSelectedAccountName();
   const dateFrom = document.getElementById('dateFrom').value;
   const dateTo = document.getElementById('dateTo').value;
   const container = document.getElementById('debugModalContent');
@@ -594,7 +690,7 @@ async function fetchDebugData() {
 
   const accountType = getSelectedAccountType();
   const params = new URLSearchParams({
-    account_name: pgAccount,
+    account_name: accountName,
     date_from: dateFrom,
     date_to: dateTo,
   });
@@ -607,18 +703,19 @@ async function fetchDebugData() {
       container.innerHTML = `<div class="error">${data.error}</div>`;
       return;
     }
-    renderDebugContent(data, pgAccount, dateFrom, dateTo);
+    renderDebugContent(data, accountName, accountType, dateFrom, dateTo);
   } catch(e) {
     container.innerHTML = `<div class="error">Failed to fetch debug data: ${e.message}</div>`;
   }
 }
 
-function renderDebugContent(data, pgAccount, dateFrom, dateTo) {
+function renderDebugContent(data, accountName, accountType, dateFrom, dateTo) {
   const container = document.getElementById('debugModalContent');
+  const typeDisplay = accountType || 'All Types (auto-fallback)';
 
   let html = `
     <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #e9ecef;">
-      <strong>Account:</strong> ${pgAccount} | <strong>Range:</strong> ${dateFrom} to ${dateTo} | <strong>PG Count:</strong> ${data.pg_count} | <strong>Bean Count:</strong> ${data.bean_count}
+      <strong>Account:</strong> ${escapeHtml(accountName)} | <strong>Type:</strong> ${escapeHtml(typeDisplay)} | <strong>Range:</strong> ${dateFrom} to ${dateTo} | <strong>PG Count:</strong> ${data.pg_count} | <strong>Bean Count:</strong> ${data.bean_count}
     </div>
   `;
 
