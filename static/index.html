@@ -116,10 +116,52 @@
     .debug-tables-container { flex-direction: column; }
     .debug-table-box { min-width: 0; }
   }
+  /* View nav + Advanced view */
+  .view-nav { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #e0e0e0; }
+  .view-nav button { background: none; color: #666; border: none; border-bottom: 3px solid transparent; border-radius: 0; padding: 10px 16px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .view-nav button:hover { background: none; color: #1a73e8; }
+  .view-nav button.active { color: #1a73e8; border-bottom-color: #1a73e8; }
+  .view { display: block; }
+  .view.hidden { display: none; }
+  .adv-card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+  .adv-card h2 { font-size: 16px; color: #1a1a2e; margin-bottom: 12px; }
+  .adv-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .adv-row select, .adv-row input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+  .adv-row input { flex: 1; min-width: 200px; }
+  .adv-remove { background: #d93025; padding: 6px 10px; font-size: 12px; }
+  .adv-remove:hover { background: #a5271f; }
+  .adv-add { background: #e8eaed; color: #333; padding: 6px 12px; font-size: 13px; font-weight: 600; }
+  .adv-add:hover { background: #dadce0; }
+  .adv-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .adv-execute { background: #d93025; }
+  .adv-execute:hover:not(:disabled) { background: #a5271f; }
+  .adv-table-wrap { max-height: 400px; overflow: auto; border: 1px solid #eee; border-radius: 6px; background: #fff; }
+  .adv-table-wrap table { width: 100%; border-collapse: collapse; box-shadow: none; border-radius: 0; }
+  .adv-table-wrap th { position: sticky; top: 0; background: #f8f9fa; z-index: 1; }
+  .adv-detail-btn { padding: 4px 10px; font-size: 12px; background: #666; }
+  .adv-detail-btn:hover { background: #444; }
+  .adv-rollback-btn { padding: 4px 10px; font-size: 12px; background: #e37400; }
+  .adv-rollback-btn:hover { background: #b25c00; }
+  .adv-rollback-btn:disabled { background: #ccc; }
+  .adv-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
+  .adv-modal-inner { background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); width: 100%; max-width: 1100px; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+  .adv-modal-head { padding: 15px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #f8f9fa; }
+  .adv-modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+  @media (max-width: 768px) {
+    .view-nav button { flex: 1; padding: 10px 8px; }
+    .adv-card { padding: 12px; }
+  }
 </style>
 </head>
 <body>
 <h1>📊 PG vs Beancount Reconciliation</h1>
+
+<div class="view-nav">
+  <button id="navReconcile" class="active" onclick="showView('reconcile')">Reconcile</button>
+  <button id="navAdvanced" onclick="showView('advanced')">Advanced</button>
+</div>
+
+<div id="view-reconcile" class="view">
 
 <div class="controls">
   <div class="control-group">
@@ -202,6 +244,63 @@
     </div>
     <div id="debugModalContent" style="padding:20px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:20px;">
       <div class="loading">Loading debug data...</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /view-reconcile -->
+
+<!-- Advanced view -->
+<div id="view-advanced" class="view hidden">
+
+  <!-- Custom Update Builder -->
+  <div class="adv-card">
+    <h2>🔧 Custom Update Builder</h2>
+    <div class="adv-row">
+      <label style="width:110px; flex-shrink:0;">Description *</label>
+      <input type="text" id="advDescription" placeholder="e.g. Fix category for AMAZON charges" style="flex:1; min-width:200px;">
+    </div>
+    <div style="margin-top:14px;">
+      <label>SET</label>
+      <div id="advSetRows" style="margin-top:6px;"></div>
+      <button class="adv-add" onclick="addSetRow()">+ Add SET field</button>
+    </div>
+    <div style="margin-top:14px;">
+      <label>WHERE</label>
+      <div id="advWhereRows" style="margin-top:6px;"></div>
+      <button class="adv-add" onclick="addWhereRow()">+ Add condition</button>
+    </div>
+    <div class="adv-actions">
+      <button id="advPreviewBtn" onclick="advPreview()">Preview</button>
+      <button id="advExecuteBtn" class="adv-execute" onclick="advExecute()" disabled>Execute</button>
+    </div>
+  </div>
+
+  <!-- Preview results -->
+  <div class="adv-card" id="advPreviewCard" style="display:none;">
+    <h2 id="advPreviewHeader">Preview</h2>
+    <div class="adv-table-wrap" id="advPreviewTableWrap"></div>
+  </div>
+
+  <!-- History -->
+  <div class="adv-card">
+    <h2>📜 Update History</h2>
+    <div class="adv-table-wrap" id="advHistoryTableWrap">
+      <div class="loading">Loading history...</div>
+    </div>
+  </div>
+
+</div><!-- /view-advanced -->
+
+<!-- History details modal -->
+<div id="advDetailsModal" class="adv-modal">
+  <div class="adv-modal-inner">
+    <div class="adv-modal-head">
+      <h3 style="font-size:18px; color:#1a1a2e;" id="advDetailsTitle">History Details</h3>
+      <button onclick="closeAdvDetailsModal()" style="padding:4px 10px; background:#666; font-size:12px;">Close &times;</button>
+    </div>
+    <div class="adv-modal-body" id="advDetailsBody">
+      <div class="loading">Loading...</div>
     </div>
   </div>
 </div>
@@ -807,8 +906,454 @@ function copyText(elementId) {
 }
 
 function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
+
+// ═══════════ ADVANCED SECTION ═══════════
+
+const ADV_SET_COLS = ['type', 'account_name', 'category', 'payee', 'description'];
+const ADV_WHERE_COLS = ['account_name', 'type', 'external_id', 'transaction_date', 'amount', 'payee', 'description', 'category'];
+
+let lastAdvPreview = null;
+
+function showView(view) {
+  const isAdv = view === 'advanced';
+  document.getElementById('navReconcile').classList.toggle('active', !isAdv);
+  document.getElementById('navAdvanced').classList.toggle('active', isAdv);
+  document.getElementById('view-reconcile').classList.toggle('hidden', isAdv);
+  document.getElementById('view-advanced').classList.toggle('hidden', !isAdv);
+
+  if (isAdv) {
+    initAdvFormIfEmpty();
+    loadUpdateHistory();
+  }
+}
+
+function initAdvFormIfEmpty() {
+  const setContainer = document.getElementById('advSetRows');
+  if (setContainer.children.length === 0) {
+    addSetRow();
+  }
+  const whereContainer = document.getElementById('advWhereRows');
+  if (whereContainer.children.length === 0) {
+    addWhereRow();
+  }
+}
+
+function createColSelect(cols, selectedVal) {
+  const sel = document.createElement('select');
+  cols.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    if (c === selectedVal) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', invalidateAdvPreview);
+  return sel;
+}
+
+function addSetRow(col, val) {
+  const container = document.getElementById('advSetRows');
+  const row = document.createElement('div');
+  row.className = 'adv-row adv-set-row';
+
+  const sel = createColSelect(ADV_SET_COLS, col || ADV_SET_COLS[0]);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Value';
+  input.value = val ?? '';
+  input.addEventListener('input', invalidateAdvPreview);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'adv-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.onclick = () => {
+    row.remove();
+    invalidateAdvPreview();
+  };
+
+  row.appendChild(sel);
+  row.appendChild(input);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+  invalidateAdvPreview();
+}
+
+function addWhereRow(col, val) {
+  const container = document.getElementById('advWhereRows');
+  const row = document.createElement('div');
+  row.className = 'adv-row adv-where-row';
+
+  const sel = createColSelect(ADV_WHERE_COLS, col || ADV_WHERE_COLS[0]);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Value';
+  input.value = val ?? '';
+  input.addEventListener('input', invalidateAdvPreview);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'adv-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.onclick = () => {
+    row.remove();
+    invalidateAdvPreview();
+  };
+
+  row.appendChild(sel);
+  row.appendChild(input);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+  invalidateAdvPreview();
+}
+
+function invalidateAdvPreview() {
+  lastAdvPreview = null;
+  const execBtn = document.getElementById('advExecuteBtn');
+  if (execBtn) {
+    execBtn.disabled = true;
+    execBtn.textContent = 'Execute';
+  }
+  const previewCard = document.getElementById('advPreviewCard');
+  if (previewCard) previewCard.style.display = 'none';
+}
+
+function collectClauses() {
+  const setRows = document.querySelectorAll('#advSetRows .adv-set-row');
+  const whereRows = document.querySelectorAll('#advWhereRows .adv-where-row');
+
+  if (setRows.length === 0) {
+    throw new Error('At least one SET field is required.');
+  }
+  if (whereRows.length === 0) {
+    throw new Error('At least one WHERE condition is required.');
+  }
+
+  const setObj = {};
+  setRows.forEach(r => {
+    const col = r.querySelector('select').value;
+    const val = r.querySelector('input').value;
+    setObj[col] = val;
+  });
+
+  const whereObj = {};
+  whereRows.forEach(r => {
+    const col = r.querySelector('select').value;
+    const val = r.querySelector('input').value;
+    whereObj[col] = val;
+  });
+
+  return { set: setObj, where: whereObj };
+}
+
+async function advPreview() {
+  let clauses;
+  try {
+    clauses = collectClauses();
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+
+  const btn = document.getElementById('advPreviewBtn');
+  btn.disabled = true;
+  btn.textContent = 'Previewing...';
+
+  try {
+    const resp = await fetch('/api/admin/updates/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ set: clauses.set, where: clauses.where }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || data.error || ('Preview failed with status ' + resp.status);
+      alert(msg);
+      return;
+    }
+
+    lastAdvPreview = {
+      set: clauses.set,
+      where: clauses.where,
+      count: data.count,
+    };
+
+    renderAdvPreview(data, clauses.set, clauses.where);
+
+    const execBtn = document.getElementById('advExecuteBtn');
+    execBtn.disabled = false;
+    execBtn.textContent = `Execute (${data.count} records will change)`;
+  } catch (e) {
+    alert('Preview request failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Preview';
+  }
+}
+
+function renderAdvPreview(data, setObj, whereObj) {
+  const card = document.getElementById('advPreviewCard');
+  const header = document.getElementById('advPreviewHeader');
+  const wrap = document.getElementById('advPreviewTableWrap');
+
+  header.textContent = `${data.count} records match this criteria`;
+
+  const sample = (data.sample || []).slice(0, 20);
+  if (sample.length === 0) {
+    wrap.innerHTML = '<div style="padding:20px; text-align:center; color:#666;">No sample records returned.</div>';
+    card.style.display = 'block';
+    return;
+  }
+
+  // Columns shown = columns being SET + WHERE columns + external_id + transaction_date + amount
+  const colSet = new Set();
+  Object.keys(setObj).forEach(c => colSet.add(c));
+  Object.keys(whereObj).forEach(c => colSet.add(c));
+  colSet.add('external_id');
+  colSet.add('transaction_date');
+  colSet.add('amount');
+  const displayCols = Array.from(colSet);
+
+  let html = '<table><thead><tr>';
+  displayCols.forEach(c => {
+    html += `<th>${escapeHtml(c)}</th>`;
+  });
+  html += '</tr></thead><tbody>';
+
+  sample.forEach(row => {
+    html += '<tr>';
+    displayCols.forEach(c => {
+      const val = row[c] !== undefined && row[c] !== null ? String(row[c]) : '';
+      html += `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+  card.style.display = 'block';
+}
+
+async function advExecute() {
+  if (!lastAdvPreview) {
+    alert('Please run a preview first.');
+    return;
+  }
+
+  const descInput = document.getElementById('advDescription');
+  const desc = (descInput.value || '').trim();
+  if (!desc) {
+    alert('Description is required.');
+    descInput.focus();
+    return;
+  }
+
+  const count = lastAdvPreview.count;
+  if (!confirm(`This will permanently update ${count} records. Continue?`)) {
+    return;
+  }
+
+  const btn = document.getElementById('advExecuteBtn');
+  btn.disabled = true;
+  btn.textContent = 'Executing...';
+
+  try {
+    const resp = await fetch('/api/admin/updates/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        set: lastAdvPreview.set,
+        where: lastAdvPreview.where,
+        description: desc,
+        confirm_count: count,
+      }),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || data.error || ('Execute failed with status ' + resp.status);
+      alert(msg);
+      return;
+    }
+
+    alert(`Updated ${data.rows_affected} records (history_id=${data.history_id})`);
+    resetAdvForm();
+    await loadUpdateHistory();
+  } catch (e) {
+    alert('Execute request failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    if (lastAdvPreview) {
+      btn.textContent = `Execute (${lastAdvPreview.count} records will change)`;
+    } else {
+      btn.textContent = 'Execute';
+    }
+  }
+}
+
+function resetAdvForm() {
+  document.getElementById('advDescription').value = '';
+  document.getElementById('advSetRows').innerHTML = '';
+  document.getElementById('advWhereRows').innerHTML = '';
+  addSetRow();
+  addWhereRow();
+  invalidateAdvPreview();
+}
+
+function formatClauseSummary(clause) {
+  if (!clause || typeof clause !== 'object') return '—';
+  const entries = Object.entries(clause);
+  if (entries.length === 0) return '—';
+  return entries.map(([k, v]) => `${k}=${v}`).join(', ');
+}
+
+async function loadUpdateHistory() {
+  const wrap = document.getElementById('advHistoryTableWrap');
+  wrap.innerHTML = '<div class="loading">Loading history...</div>';
+
+  try {
+    const resp = await fetch('/api/admin/updates/history');
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || data.error || 'Failed to load history';
+      wrap.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+      return;
+    }
+
+    if (!Array.isArray(data) || data.length === 0) {
+      wrap.innerHTML = '<div style="padding:20px; text-align:center; color:#666;">No update history found.</div>';
+      return;
+    }
+
+    let html = '<table><thead><tr>';
+    html += '<th>ID</th><th>Timestamp</th><th>Source</th><th>Description</th><th>SET Summary</th><th>WHERE Summary</th><th>Rows Affected</th><th>Rolled Back?</th><th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    data.forEach(item => {
+      const isRolledBack = Boolean(item.rolled_back_at);
+      const rolledBackText = isRolledBack ? `Yes (${item.rolled_back_at})` : 'No';
+      const setSum = formatClauseSummary(item.set_clause);
+      const whereSum = formatClauseSummary(item.where_clause);
+
+      html += '<tr>';
+      html += `<td>${item.id}</td>`;
+      html += `<td style="white-space:nowrap;">${escapeHtml(item.executed_at || '')}</td>`;
+      html += `<td>${escapeHtml(item.source || '')}</td>`;
+      html += `<td>${escapeHtml(item.description || '')}</td>`;
+      html += `<td><code>${escapeHtml(setSum)}</code></td>`;
+      html += `<td><code>${escapeHtml(whereSum)}</code></td>`;
+      html += `<td>${item.rows_affected}</td>`;
+      html += `<td>${escapeHtml(rolledBackText)}</td>`;
+      html += `<td style="white-space:nowrap;">`;
+      html += `<button class="adv-detail-btn" onclick="openAdvDetailsModal(${item.id})">Details</button> `;
+      if (!isRolledBack) {
+        html += `<button class="adv-rollback-btn" onclick="advRollback(${item.id})">Rollback</button>`;
+      }
+      html += `</td>`;
+      html += '</tr>';
+    });
+
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  } catch (e) {
+    wrap.innerHTML = `<div class="error">Failed to load history: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function openAdvDetailsModal(id) {
+  const modal = document.getElementById('advDetailsModal');
+  const title = document.getElementById('advDetailsTitle');
+  const body = document.getElementById('advDetailsBody');
+
+  title.textContent = `History Entry #${id} Details`;
+  body.innerHTML = '<div class="loading">Loading details...</div>';
+  modal.style.display = 'flex';
+
+  try {
+    const resp = await fetch(`/api/admin/updates/history/${id}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || data.error || 'Failed to fetch details';
+      body.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+      return;
+    }
+
+    renderAdvDetails(data);
+  } catch (e) {
+    body.innerHTML = `<div class="error">Failed to load details: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderAdvDetails(entry) {
+  const body = document.getElementById('advDetailsBody');
+  const oldRecords = Array.isArray(entry.old_records) ? entry.old_records : [];
+
+  let html = `
+    <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #e9ecef; margin-bottom:15px; font-size:13px; display:flex; flex-direction:column; gap:6px;">
+      <div><strong>ID:</strong> ${entry.id} | <strong>Executed At:</strong> ${escapeHtml(entry.executed_at || '')} | <strong>Source:</strong> ${escapeHtml(entry.source || '')}</div>
+      <div><strong>Description:</strong> ${escapeHtml(entry.description || '—')}</div>
+      <div><strong>SET:</strong> <code>${escapeHtml(JSON.stringify(entry.set_clause))}</code></div>
+      <div><strong>WHERE:</strong> <code>${escapeHtml(JSON.stringify(entry.where_clause))}</code></div>
+      <div><strong>Rows Affected:</strong> ${entry.rows_affected} | <strong>Rolled Back At:</strong> ${entry.rolled_back_at ? escapeHtml(entry.rolled_back_at) : 'No'}</div>
+    </div>
+  `;
+
+  html += `<h4 style="margin-bottom:8px; font-size:14px; color:#1a1a2e;">Old Records Snapshot (${oldRecords.length})</h4>`;
+
+  if (oldRecords.length === 0) {
+    html += '<div style="color:#666;">No old records stored for this entry.</div>';
+  } else {
+    const cols = Object.keys(oldRecords[0]);
+    html += '<div class="adv-table-wrap"><table><thead><tr>';
+    cols.forEach(c => html += `<th>${escapeHtml(c)}</th>`);
+    html += '</tr></thead><tbody>';
+
+    oldRecords.forEach(r => {
+      html += '<tr>';
+      cols.forEach(c => {
+        const val = r[c] !== undefined && r[c] !== null ? (typeof r[c] === 'object' ? JSON.stringify(r[c]) : String(r[c])) : '';
+        html += `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+      });
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+  }
+
+  body.innerHTML = html;
+}
+
+function closeAdvDetailsModal() {
+  document.getElementById('advDetailsModal').style.display = 'none';
+}
+
+async function advRollback(id) {
+  if (!confirm(`Rollback update #${id}? This will restore the old records.`)) {
+    return;
+  }
+
+  try {
+    const resp = await fetch(`/api/admin/updates/rollback/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || data.error || ('Rollback failed with status ' + resp.status);
+      alert(msg);
+      return;
+    }
+
+    alert(`Successfully rolled back update #${data.history_id} (${data.rolled_back} records restored).`);
+    await loadUpdateHistory();
+  } catch (e) {
+    alert('Rollback request failed: ' + e.message);
+  }
+}
+
 
 </script>
 </body>
