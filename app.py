@@ -7,8 +7,8 @@ from decimal import Decimal
 from typing import Any
 
 import beanquery
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import psycopg2
 import psycopg2.extras
@@ -38,6 +38,12 @@ VALID_ACCOUNT_TYPES = {
     "Current", "Savings", "CreditCard", "Loan", "Mortgage",
     "Pension", "Income", "Investment", "Cash", "Suspended", "Fixed",
 }
+
+# Whitelists for the audited custom-update admin endpoints. Only these columns
+# may appear in SET / WHERE clauses respectively — anything else is rejected
+# with a 400 before any SQL is built.
+SET_COLUMNS = {"type", "account_name", "category", "payee", "description"}
+WHERE_COLUMNS = {"account_name", "type", "external_id", "transaction_date", "amount", "payee", "description", "category"}
 
 
 def extract_bean_type(bean_account: str) -> str | None:
@@ -149,6 +155,70 @@ def get_pg_conn():
 
 def get_bean_conn():
     return beanquery.connect(f"beancount:///{BEAN_PATH}")
+
+
+def _build_where(conditions: dict) -> tuple[str, list]:
+    """Build 'col1 = %s AND col2 = %s' + params list. Keys must be in WHERE_COLUMNS."""
+    invalid = set(conditions.keys()) - WHERE_COLUMNS
+    if invalid:
+        raise ValueError(f"Invalid WHERE columns: {invalid}")
+    if not conditions:
+        raise ValueError("WHERE clause cannot be empty")
+    parts = []
+    params = []
+    for col, val in conditions.items():
+        parts.append(f"{col} = %s")
+        params.append(val)
+    return " AND ".join(parts), params
+
+
+def _json_safe(obj):
+    import datetime, decimal
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+@app.on_event("startup")
+def _ensure_update_history_table():
+    """Idempotent DDL for the audited custom-update history table."""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transaction_update_history (
+                id SERIAL PRIMARY KEY,
+                executed_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                source TEXT,
+                description TEXT,
+                set_clause JSONB,
+                where_clause JSONB,
+                rows_affected INTEGER,
+                old_records JSONB,
+                rolled_back_at TIMESTAMP WITHOUT TIME ZONE
+            )
+            """
+        )
+        conn.commit()
+        cur.close()
+    except Exception:
+        # Table creation is best-effort at startup; endpoints will surface
+        # errors if the table is genuinely missing at request time.
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -719,4 +789,311 @@ async def debug_endpoint(
     if bean_error:
         result["bean_error"] = bean_error
     return result
+
+
+def _db_param(val):
+    if isinstance(val, (dict, list)):
+        return psycopg2.extras.Json(val)
+    return val
+
+
+@app.post("/api/admin/updates/preview")
+async def preview_update(body: dict[str, Any]):
+    set_clause = body.get("set")
+    where_clause = body.get("where")
+
+    if not isinstance(set_clause, dict) or not set_clause:
+        raise HTTPException(status_code=400, detail="'set' must be a non-empty object")
+    if not isinstance(where_clause, dict) or not where_clause:
+        raise HTTPException(status_code=400, detail="'where' must be a non-empty object")
+
+    invalid_set = set(set_clause.keys()) - SET_COLUMNS
+    if invalid_set:
+        raise HTTPException(status_code=400, detail=f"Invalid SET columns: {sorted(invalid_set)}")
+
+    try:
+        where_sql, where_params = _build_where(where_clause)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+
+        count_query = f"SELECT COUNT(*) AS total FROM transactions WHERE {where_sql}"
+        cur.execute(count_query, tuple(where_params))
+        total_count = cur.fetchone()["total"]
+
+        sample_query = f"SELECT * FROM transactions WHERE {where_sql} LIMIT 100"
+        cur.execute(sample_query, tuple(where_params))
+        sample_rows = [_json_safe(dict(r)) for r in cur.fetchall()]
+
+        cur.close()
+        return {"count": total_count, "sample": sample_rows}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post("/api/admin/updates/execute")
+async def execute_update(body: dict[str, Any]):
+    set_clause = body.get("set")
+    where_clause = body.get("where")
+    description = body.get("description", "")
+    confirm_count = body.get("confirm_count")
+
+    if not isinstance(set_clause, dict) or not set_clause:
+        raise HTTPException(status_code=400, detail="'set' must be a non-empty object")
+    if not isinstance(where_clause, dict) or not where_clause:
+        raise HTTPException(status_code=400, detail="'where' must be a non-empty object")
+
+    invalid_set = set(set_clause.keys()) - SET_COLUMNS
+    if invalid_set:
+        raise HTTPException(status_code=400, detail=f"Invalid SET columns: {sorted(invalid_set)}")
+
+    try:
+        where_sql, where_params = _build_where(where_clause)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+
+        # 1. SELECT * FROM transactions WHERE <clause> FOR UPDATE -> old_rows
+        lock_query = f"SELECT * FROM transactions WHERE {where_sql} FOR UPDATE"
+        cur.execute(lock_query, tuple(where_params))
+        old_rows = cur.fetchall()
+
+        # 2. If zero rows: rollback, return 400 "no rows match"
+        if not old_rows:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail="no rows match")
+
+        # 3. If confirm_count provided and != len(old_rows): rollback, return 400 "count mismatch, expected X got Y"
+        if confirm_count is not None and int(confirm_count) != len(old_rows):
+            conn.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=f"count mismatch, expected {confirm_count} got {len(old_rows)}",
+            )
+
+        # 4. Serialize old_rows with _json_safe, INSERT INTO transaction_update_history
+        safe_old_rows = [_json_safe(dict(r)) for r in old_rows]
+        insert_history_query = """
+            INSERT INTO transaction_update_history
+                (source, description, set_clause, where_clause, rows_affected, old_records)
+            VALUES
+                ('api', %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        cur.execute(
+            insert_history_query,
+            (
+                description,
+                psycopg2.extras.Json(set_clause),
+                psycopg2.extras.Json(where_clause),
+                len(old_rows),
+                psycopg2.extras.Json(safe_old_rows),
+            ),
+        )
+        history_id = cur.fetchone()["id"]
+
+        # 5. UPDATE transactions SET <set cols> = %s, updated_at = NOW() WHERE <clause>
+        set_cols = list(set_clause.keys())
+        set_parts = [f"{col} = %s" for col in set_cols]
+        set_values = [_db_param(set_clause[col]) for col in set_cols]
+        update_query = (
+            f"UPDATE transactions SET {', '.join(set_parts)}, updated_at = NOW() "
+            f"WHERE {where_sql}"
+        )
+        cur.execute(update_query, tuple(set_values + where_params))
+
+        # 6. If cur.rowcount != len(old_rows): raise RuntimeError to force rollback
+        if cur.rowcount != len(old_rows):
+            raise RuntimeError(
+                f"Rowcount mismatch: locked {len(old_rows)} rows but updated {cur.rowcount}"
+            )
+
+        # 7. COMMIT
+        conn.commit()
+        rows_affected = cur.rowcount
+        cur.close()
+        return {"history_id": history_id, "rows_affected": rows_affected}
+    except HTTPException:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.get("/api/admin/updates/history")
+async def get_update_history():
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, executed_at, source, description, set_clause, where_clause, rows_affected, rolled_back_at
+            FROM transaction_update_history
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        )
+        rows = [_json_safe(dict(r)) for r in cur.fetchall()]
+        cur.close()
+        return rows
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.get("/api/admin/updates/history/{id}")
+async def get_update_history_entry(id: int):
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, executed_at, source, description, set_clause, where_clause, rows_affected, old_records, rolled_back_at
+            FROM transaction_update_history
+            WHERE id = %s
+            """,
+            (id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"History entry {id} not found")
+        return _json_safe(dict(row))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post("/api/admin/updates/rollback/{id}")
+async def rollback_update(id: int):
+    conn = None
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT id, old_records, rolled_back_at
+            FROM transaction_update_history
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (id,),
+        )
+        entry = cur.fetchone()
+        if not entry:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"History entry {id} not found")
+
+        if entry["rolled_back_at"] is not None:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail="already rolled back")
+
+        old_records = entry["old_records"]
+        if isinstance(old_records, str):
+            import json
+            old_records = json.loads(old_records)
+
+        rolled_back_count = 0
+        if isinstance(old_records, list):
+            for rec in old_records:
+                if not isinstance(rec, dict):
+                    continue
+                ext_id = rec.get("external_id")
+                if not ext_id:
+                    continue
+
+                # All cols from record except external_id and updated_at
+                restore_cols = [
+                    k for k in rec.keys()
+                    if k not in ("external_id", "updated_at")
+                    and re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", k)
+                ]
+                if not restore_cols:
+                    continue
+
+                set_parts = [f"{col} = %s" for col in restore_cols]
+                params = [_db_param(rec[col]) for col in restore_cols]
+                params.append(ext_id)
+
+                restore_query = (
+                    f"UPDATE transactions SET {', '.join(set_parts)}, updated_at = NOW() "
+                    f"WHERE external_id = %s"
+                )
+                cur.execute(restore_query, tuple(params))
+                rolled_back_count += cur.rowcount
+
+        cur.execute(
+            "UPDATE transaction_update_history SET rolled_back_at = NOW() WHERE id = %s",
+            (id,),
+        )
+        conn.commit()
+        cur.close()
+        return {"rolled_back": rolled_back_count, "history_id": id}
+    except HTTPException:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 
