@@ -173,18 +173,15 @@
     <input type="date" id="dateTo" value="2025-01-31">
   </div>
   <div class="control-group form-group">
-    <label for="account-type">Account Type:</label>
-    <select id="account-type" onchange="onTypeChange()">
-      <option value="">All Types</option>
-      <!-- populated from /api/account-types -->
-    </select>
-  </div>
-  <div class="control-group form-group">
     <label for="account-name">Account Name:</label>
     <select id="account-name" onchange="onAccountChange()">
       <option value="">Loading...</option>
       <!-- populated from /api/accounts -->
     </select>
+  </div>
+  <div class="control-group form-group">
+    <label for="account-type">Account Type:</label>
+    <input type="text" id="account-type" readonly value="" placeholder="—" style="background:#f1f3f4; color:#555; cursor:default; max-width:160px;">
   </div>
   <div class="control-group">
     <label>Tolerance</label>
@@ -311,8 +308,8 @@ let lastParams = null;
 // === Form state persistence via localStorage ===
 const FORM_STATE_KEY = 'reconcile_form_state';
 
-let allPgAccounts = [];
-let allBeanAccounts = [];
+let allAccounts = [];
+let accountTypeMap = {};
 
 function saveFormState() {
   try {
@@ -320,8 +317,8 @@ function saveFormState() {
     const state = {
       dateFrom: document.getElementById('dateFrom').value,
       dateTo: document.getElementById('dateTo').value,
-      accountType: document.getElementById('account-type').value,
       accountName: document.getElementById('account-name').value,
+      tolerance: document.getElementById('tolerance').value,
       columns: columns,
       statusFilter: document.getElementById('statusFilter').value,
     };
@@ -336,17 +333,11 @@ function restoreFormState() {
     const state = JSON.parse(raw);
     if (state.dateFrom) document.getElementById('dateFrom').value = state.dateFrom;
     if (state.dateTo) document.getElementById('dateTo').value = state.dateTo;
-    if (state.accountType !== undefined) {
-      const typeSel = document.getElementById('account-type');
-      if (Array.from(typeSel.options).some(o => o.value === state.accountType)) {
-        typeSel.value = state.accountType;
-        populateAccountDropdown();
-      }
-    }
+    if (state.tolerance) document.getElementById('tolerance').value = state.tolerance;
     const targetName = state.accountName || state.pgAccount;
     if (targetName) {
       const nameSel = document.getElementById('account-name');
-      if (Array.from(nameSel.options).some(o => o.value === targetName)) {
+      if (nameSel && Array.from(nameSel.options).some(o => o.value === targetName)) {
         nameSel.value = targetName;
       }
     }
@@ -358,7 +349,7 @@ function restoreFormState() {
     if (state.statusFilter) {
       document.getElementById('statusFilter').value = state.statusFilter;
     }
-    updateSelectionDisplay();
+    onAccountChange();
   } catch(e) {}
 }
 
@@ -367,89 +358,62 @@ function attachFormListeners() {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', saveFormState);
   });
-  const typeEl = document.getElementById('account-type');
-  if (typeEl) typeEl.addEventListener('change', onTypeChange);
   const nameEl = document.getElementById('account-name');
   if (nameEl) nameEl.addEventListener('change', onAccountChange);
 
   document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', saveFormState);
   });
-  document.getElementById('statusFilter').addEventListener('change', () => {
-    saveFormState();
-  });
+  const filterEl = document.getElementById('statusFilter');
+  if (filterEl) {
+    filterEl.addEventListener('change', () => {
+      saveFormState();
+    });
+  }
 }
 
 function updateSelectionDisplay() {
-  const typeSel = document.getElementById('account-type');
   const nameSel = document.getElementById('account-name');
-  const typeVal = typeSel && typeSel.value ? typeSel.value : 'All Types';
+  const typeEl = document.getElementById('account-type');
   const nameVal = nameSel && nameSel.value ? nameSel.value : '(none)';
+  const typeVal = typeEl && typeEl.value ? typeEl.value : (accountTypeMap[nameVal] || '—');
   const dispName = document.getElementById('displayAccountName');
   const dispType = document.getElementById('displayAccountType');
   if (dispName) dispName.textContent = nameVal;
-  if (dispType) dispType.textContent = typeVal;
-}
-
-function onTypeChange() {
-  populateAccountDropdown();
-  updateSelectionDisplay();
-  saveFormState();
+  if (dispType) dispType.textContent = typeVal || '—';
 }
 
 function onAccountChange() {
+  const name = getSelectedAccountName();
+  const derivedType = accountTypeMap[name] || '';
+  const typeEl = document.getElementById('account-type');
+  if (typeEl) {
+    typeEl.value = derivedType;
+  }
   updateSelectionDisplay();
   saveFormState();
 }
 
-function populateAccountDropdown() {
-  const typeSel = document.getElementById('account-type');
-  const selectedType = typeSel ? typeSel.value : '';
+function populateAccountDropdown(accounts) {
   const nameSel = document.getElementById('account-name');
   const prevVal = nameSel.value;
   nameSel.innerHTML = '';
 
-  let accountsToShow = [];
-  if (selectedType) {
-    const matchingBean = allBeanAccounts.filter(b => b.type === selectedType);
-    accountsToShow = Array.from(new Set(matchingBean.map(b => b.account_name))).sort();
-  } else {
-    const set = new Set(allPgAccounts);
-    allBeanAccounts.forEach(b => { if (b.account_name) set.add(b.account_name); });
-    accountsToShow = Array.from(set).sort();
-  }
-
-  if (accountsToShow.length === 0) {
+  const accountsList = accounts || allAccounts || [];
+  if (accountsList.length === 0) {
     nameSel.innerHTML = '<option value="">No accounts found</option>';
   } else {
-    accountsToShow.forEach(a => {
+    accountsList.forEach(a => {
       const opt = document.createElement('option');
-      opt.value = a;
-      opt.textContent = a;
+      const name = typeof a === 'string' ? a : a.name;
+      opt.value = name;
+      opt.textContent = name;
       nameSel.appendChild(opt);
     });
-    if (accountsToShow.includes(prevVal)) {
+    const names = accountsList.map(a => typeof a === 'string' ? a : a.name);
+    if (prevVal && names.includes(prevVal)) {
       nameSel.value = prevVal;
     }
-  }
-}
-
-async function loadAccountTypes() {
-  try {
-    const resp = await fetch('/api/account-types');
-    const data = await resp.json();
-    const typeSel = document.getElementById('account-type');
-    typeSel.innerHTML = '<option value="">All Types</option>';
-    if (data.types && Array.isArray(data.types)) {
-      data.types.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t.type;
-        opt.textContent = `${t.type} (${t.count})`;
-        typeSel.appendChild(opt);
-      });
-    }
-  } catch(e) {
-    console.warn('Failed to load account types:', e);
   }
 }
 
@@ -457,17 +421,30 @@ async function loadAccounts() {
   try {
     const resp = await fetch('/api/accounts');
     const data = await resp.json();
-    if (data.warning) {
-      console.warn('Account mapping warning:', data.warning);
+    let accounts = [];
+    if (Array.isArray(data)) {
+      accounts = data;
+    } else if (data.accounts && Array.isArray(data.accounts)) {
+      accounts = data.accounts.map(a => typeof a === 'string' ? { name: a, type: '' } : a);
+    } else if (data.bean_accounts && Array.isArray(data.bean_accounts)) {
+      accounts = data.bean_accounts.map(b => ({ name: b.account_name, type: b.type }));
+    } else if (data.pg_accounts && Array.isArray(data.pg_accounts)) {
+      accounts = data.pg_accounts.map(a => ({ name: a, type: '' }));
     }
-    allPgAccounts = data.pg_accounts || [];
-    allBeanAccounts = data.bean_accounts || [];
 
-    populateAccountDropdown();
+    accountTypeMap = {};
+    accounts.forEach(a => {
+      if (a.name) {
+        accountTypeMap[a.name] = a.type || '';
+      }
+    });
+    allAccounts = accounts;
+
+    populateAccountDropdown(accounts);
     document.getElementById('runBtn').disabled = false;
     document.getElementById('debugBtn').disabled = false;
     restoreFormState();
-    updateSelectionDisplay();
+    onAccountChange();
   } catch(e) {
     document.getElementById('errorBox').textContent = 'Failed to load accounts: ' + e.message;
     document.getElementById('errorBox').style.display = 'block';
@@ -476,7 +453,9 @@ async function loadAccounts() {
 
 function getSelectedAccountType() {
   const sel = document.getElementById('account-type');
-  return sel && sel.value ? sel.value : null;
+  if (sel && sel.value) return sel.value;
+  const name = getSelectedAccountName();
+  return accountTypeMap[name] || null;
 }
 
 function getSelectedAccountName() {
@@ -761,7 +740,6 @@ function exportCSV() {
 
 async function init() {
   attachFormListeners();
-  await loadAccountTypes();
   await loadAccounts();
 }
 init();

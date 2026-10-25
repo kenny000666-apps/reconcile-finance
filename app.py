@@ -251,28 +251,17 @@ async def get_account_types():
     return {"types": bean_types}
 
 
+_accounts_cache: list[dict[str, str]] | None = None
+
+
 @app.get("/api/accounts")
 async def get_accounts():
-    # Try to fetch (account_name, account_type) pairs; fall back to name-only.
-    pairs, type_warning = fetch_pg_account_types()
-    if pairs is not None:
-        pg_accounts = sorted({p["account_name"] for p in pairs})
-        pg_account_pairs = pairs
-    else:
-        # Fallback: account_type column missing — just list account names
-        pg_account_pairs = None
-        try:
-            conn = get_pg_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT account_name FROM transactions ORDER BY account_name")
-            pg_accounts = [row["account_name"] for row in cur.fetchall()]
-            cur.close()
-            conn.close()
-        except Exception as e:
-            return {"error": f"PG error: {e}", "pg_accounts": [], "bean_accounts": [], "mappings": {}}
+    """Return distinct Beancount accounts with their derived types as [{"name": ..., "type": ...}]."""
+    global _accounts_cache
+    if _accounts_cache is not None:
+        return _accounts_cache
 
-    # Query Beancount accounts with their derived types
-    bean_accounts = []
+    accounts_map: dict[str, str] = {}
     try:
         bconn = get_bean_conn()
         cur = bconn.cursor()
@@ -282,28 +271,37 @@ async def get_accounts():
             bean_type = extract_bean_type(account)
             if not bean_type:
                 continue
-            # Extract account_name (last segment)
-            account_name = account.split(':')[-1]
-            bean_accounts.append({
-                "account": account,
-                "account_name": account_name,
-                "type": bean_type
-            })
+            account_name = account.split(":")[-1]
+            if account_name and account_name not in accounts_map:
+                accounts_map[account_name] = bean_type
         cur.close()
         bconn.close()
-    except Exception as e:
-        return {"error": f"Bean error: {e}", "pg_accounts": pg_accounts, "bean_accounts": [], "mappings": ACCOUNT_MAP}
+    except Exception:
+        pass
 
-    resp = {
-        "pg_accounts": pg_accounts,
-        "bean_accounts": bean_accounts,
-        "mappings": ACCOUNT_MAP,
-    }
-    if pg_account_pairs is not None:
-        resp["pg_account_pairs"] = pg_account_pairs
-    if type_warning:
-        resp["warning"] = type_warning
-    return resp
+    # Fallback to PG / ACCOUNT_MAP if Beancount is empty or unavailable
+    if not accounts_map:
+        try:
+            pairs, _ = fetch_pg_account_types()
+            if pairs:
+                for p in pairs:
+                    name = p.get("account_name")
+                    t = p.get("account_type")
+                    if name and name not in accounts_map:
+                        accounts_map[name] = t
+        except Exception:
+            pass
+
+    if not accounts_map:
+        for name, (full_acc, _) in ACCOUNT_MAP.items():
+            t = extract_bean_type(full_acc) or "Current"
+            if name not in accounts_map:
+                accounts_map[name] = t
+
+    result = [{"name": name, "type": t} for name, t in sorted(accounts_map.items())]
+    if result:
+        _accounts_cache = result
+    return result
 
 
 @app.post("/api/reconcile")
