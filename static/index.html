@@ -181,7 +181,9 @@
   </div>
   <div class="control-group form-group">
     <label for="account-type">Account Type:</label>
-    <input type="text" id="account-type" readonly value="" placeholder="—" style="background:#f1f3f4; color:#555; cursor:default; max-width:160px;">
+    <select id="account-type" class="form-select">
+      <option value="">All types</option>
+    </select>
   </div>
   <div class="control-group">
     <label>Tolerance</label>
@@ -385,7 +387,9 @@ function updateSelectionDisplay() {
 
 function onAccountChange() {
   const name = getSelectedAccountName();
-  const derivedType = accountTypeMap[name] || '';
+  // When 'All accounts' (empty) is selected, reset type to 'All types' (empty).
+  // Otherwise auto-select the matching type but keep the dropdown editable.
+  const derivedType = name ? (accountTypeMap[name] || '') : '';
   const typeEl = document.getElementById('account-type');
   if (typeEl) {
     typeEl.value = derivedType;
@@ -400,8 +404,18 @@ function populateAccountDropdown(accounts) {
   nameSel.innerHTML = '';
 
   const accountsList = accounts || allAccounts || [];
+  // Prepend wildcard option
+  const wildcardOpt = document.createElement('option');
+  wildcardOpt.value = '';
+  wildcardOpt.textContent = 'All accounts';
+  nameSel.appendChild(wildcardOpt);
+
   if (accountsList.length === 0) {
-    nameSel.innerHTML = '<option value="">No accounts found</option>';
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No accounts found';
+    opt.disabled = true;
+    nameSel.appendChild(opt);
   } else {
     accountsList.forEach(a => {
       const opt = document.createElement('option');
@@ -439,6 +453,21 @@ async function loadAccounts() {
       }
     });
     allAccounts = accounts;
+
+    // Populate account-type dropdown from /api/account-types
+    try {
+      const typesResp = await fetch('/api/account-types');
+      const typesData = await typesResp.json();
+      const typeSelect = document.getElementById('account-type');
+      typeSelect.innerHTML = '<option value="">All types</option>';
+      (typesData.types || []).forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.type; opt.textContent = t.type;
+        typeSelect.appendChild(opt);
+      });
+    } catch (e) {
+      console.warn('Failed to load account types:', e);
+    }
 
     populateAccountDropdown(accounts);
     document.getElementById('runBtn').disabled = false;
@@ -1334,5 +1363,6 @@ async function advRollback(id) {
 
 
 </script>
+<div style="position:fixed;bottom:8px;right:12px;font-size:11px;color:#888;z-index:100;">v0.4.2-dev</div>
 </body>
 </html>
