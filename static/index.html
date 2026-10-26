@@ -39,6 +39,18 @@
   .MISMATCH .status-badge { background: #e37400; color: #fff; }
   .PG_ONLY .status-badge { background: #d93025; color: #fff; }
   .BEAN_ONLY .status-badge { background: #1a73e8; color: #fff; }
+  .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: #eceff1; color: #455a64; border: 1px solid #b0bec5; }
+  .type-badge.type-creditcard { background: #fff3e0; color: #e65100; border-color: #ffb74d; }
+  .type-badge.type-current { background: #e3f2fd; color: #1565c0; border-color: #64b5f6; }
+  .type-badge.type-savings { background: #e8f5e9; color: #2e7d32; border-color: #81c784; }
+  .type-badge.type-loan { background: #fce4ec; color: #c2185b; border-color: #f48fb1; }
+  .type-badge.type-mortgage { background: #f3e5f5; color: #6a1b9a; border-color: #ba68c8; }
+  .type-badge.type-pension { background: #ede7f6; color: #4527a0; border-color: #9575cd; }
+  .type-badge.type-investment { background: #e0f2f1; color: #00695c; border-color: #4db6ac; }
+  .type-badge.type-income { background: #f1f8e9; color: #558b2f; border-color: #aed581; }
+  .type-badge.type-cash { background: #fafafa; color: #424242; border-color: #9e9e9e; }
+  .m-card-sub { display: flex; gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+  .m-card-acct { font-size: 12px; color: #666; }
   .loading { text-align: center; padding: 40px; color: #666; }
   .error { background: #fce8e6; color: #d93025; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
   .export-btn { background: #0d904f; }
@@ -192,6 +204,8 @@
   <div class="control-group">
     <label>Columns</label>
     <div class="checkbox-group">
+      <label><input type="checkbox" value="type" checked> Type</label>
+      <label><input type="checkbox" value="account_name" checked> Account</label>
       <label><input type="checkbox" value="date" checked> Date</label>
       <label><input type="checkbox" value="payee" checked> Payee</label>
       <label><input type="checkbox" value="amount" checked> Amount</label>
@@ -575,9 +589,38 @@ function renderTable(results, data) {
     return;
   }
 
-  const cols = lastParams ? lastParams.columns : ['date','payee','amount'];
+  const selectedCols = lastParams ? lastParams.columns : ['date','payee','amount'];
+  // Always ensure these key fields are displayed for context, even if not in user-selected cols.
+  const alwaysCols = ['type', 'account_name'];
+  // Build final column list: alwaysCols first (deduped), then user-selected cols (minus amount, minus dupes).
+  const seen = new Set();
+  const cols = [];
+  for (const c of alwaysCols.concat(selectedCols)) {
+    if (c === 'amount') continue;
+    if (!seen.has(c)) { seen.add(c); cols.push(c); }
+  }
+
   const hasBeanOnly = data.results.some(r => r.status === 'BEAN_ONLY');
   const expandedIds = getExpandedIds();
+
+  const colLabel = (c) => {
+    switch (c) {
+      case 'type': return 'Type';
+      case 'account_name': return 'Account';
+      case 'external_id': return 'Ext ID';
+      case 'date': return 'Date';
+      case 'payee': return 'Payee';
+      case 'description': return 'Description';
+      case 'category': return 'Category';
+      default: return c.charAt(0).toUpperCase() + c.slice(1);
+    }
+  };
+
+  const typeBadge = (t) => {
+    if (!t) return '';
+    const cls = 'type-badge type-' + String(t).toLowerCase().replace(/[^a-z0-9]/g, '');
+    return `<span class="${cls}">${t}</span>`;
+  };
 
   // === Desktop table ===
   let hdrCols = '<th>Status</th>';
@@ -585,9 +628,7 @@ function renderTable(results, data) {
     hdrCols += '<th class="import-col"><input type="checkbox" class="import-checkbox" id="selectAllImport" onchange="toggleAllImport(this)"></th>';
   }
   for (const c of cols) {
-    if (c === 'amount') continue;
-    const label = c === 'external_id' ? 'Ext ID' : c.charAt(0).toUpperCase() + c.slice(1);
-    hdrCols += `<th>${label}</th>`;
+    hdrCols += `<th>${colLabel(c)}</th>`;
   }
   hdrCols += '<th>PG Amount</th><th>Bean Amount</th><th>Diff</th><th>PG Count</th><th>Bean Count</th>';
   let tableHtml = `<table><thead><tr>${hdrCols}</tr></thead><tbody>`;
@@ -605,9 +646,12 @@ function renderTable(results, data) {
       }
     }
     for (const c of cols) {
-      if (c === 'amount') continue;
       const val = k[c] || k.narration || '';
-      tableHtml += `<td title="${val}">${val || ''}</td>`;
+      if (c === 'type') {
+        tableHtml += `<td>${typeBadge(val)}</td>`;
+      } else {
+        tableHtml += `<td title="${val}">${val || ''}</td>`;
+      }
     }
     tableHtml += `<td>${r.pg_amount ?? '—'}</td>`;
     tableHtml += `<td>${r.bean_amount ?? '—'}</td>`;
@@ -636,7 +680,10 @@ function renderTable(results, data) {
     cardsHtml += `<div class="m-card ${r.status}${isExpanded ? ' expanded' : ''}" data-row-id="${rowId}" onclick="toggleCardExpand(this,'${rowId.replace(/'/g,"\\'")}')">`;
     cardsHtml += `<div class="m-card-header">`;
     cardsHtml += `<span class="status-badge">${r.status}</span>`;
-    cardsHtml += `<div class="m-card-info"><div class="m-card-date">${dateVal}</div><div class="m-card-payee">${payeeVal}</div></div>`;
+    const typeVal = k.type || '';
+    const acctVal = k.account_name || '';
+    const typeBadgeHtml = typeVal ? `<span class="type-badge type-${String(typeVal).toLowerCase().replace(/[^a-z0-9]/g, '')}">${typeVal}</span>` : '';
+    cardsHtml += `<div class="m-card-info"><div class="m-card-date">${dateVal}</div><div class="m-card-payee">${payeeVal}</div>${(typeBadgeHtml || acctVal) ? `<div class="m-card-sub">${typeBadgeHtml}${acctVal ? ` <span class="m-card-acct">${acctVal}</span>` : ''}</div>` : ''}</div>`;
     cardsHtml += `<div class="m-card-amounts">`;
     if (pgAmt !== '—') cardsHtml += `<span class="m-card-amt pg">PG: ${pgAmt}</span>`;
     if (beanAmt !== '—') cardsHtml += `<span class="m-card-amt bean">Bean: ${beanAmt}</span>`;
@@ -645,6 +692,8 @@ function renderTable(results, data) {
     cardsHtml += `</div>`;
     // Expandable details
     cardsHtml += `<div class="m-card-details">`;
+    if (typeVal) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Type</span><span class="m-detail-value">${typeBadgeHtml}</span></div>`;
+    if (acctVal) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Account</span><span class="m-detail-value">${acctVal}</span></div>`;
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Difference</span><span class="m-detail-value ${diffClass}">${diffVal}</span></div>`;
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">PG Count</span><span class="m-detail-value">${r.pg_count}</span></div>`;
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Bean Count</span><span class="m-detail-value">${r.bean_count}</span></div>`;

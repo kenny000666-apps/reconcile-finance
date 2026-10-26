@@ -377,7 +377,7 @@ async def reconcile(body: dict[str, Any]):
         where_clause = " AND ".join(conditions)
         query = f"""
             SELECT external_id, transaction_date, payee, description, category,
-                   amount, 1 as tx_count
+                   amount, account_name, type, 1 as tx_count
             FROM transactions
             WHERE {where_clause}
             ORDER BY transaction_date, payee
@@ -391,6 +391,8 @@ async def reconcile(body: dict[str, Any]):
                 "description": row["description"] or "",
                 "category": row["category"] or "",
                 "external_id": row["external_id"] or "",
+                "type": row["type"] or "",
+                "account_name": row["account_name"] or "",
             }
             entry = {
                 "key_dict": key_dict,
@@ -422,7 +424,8 @@ async def reconcile(body: dict[str, Any]):
         # Fetch raw postings; aggregate in Python since BQL can't GROUP BY metadata
         bean_query = f"""
             SELECT date, narration, units(position).number as amount,
-                   getitem(entry.meta, 'external_id') as external_id
+                   getitem(entry.meta, 'external_id') as external_id,
+                   account
             FROM postings
             WHERE account ~ '{bean_account_regex}'
               AND date >= {date_from} AND date < {date_to}
@@ -432,9 +435,12 @@ async def reconcile(body: dict[str, Any]):
         for row in cur.fetchall():
             raw_amount = Decimal(str(row[2]))
             ext_id = row[3]  # May be None
+            bean_account = row[4] or ""
             signed_amount = raw_amount * sign_mult
             date_str = str(row[0])
             narration = row[1] or ""
+            bean_type = extract_bean_type(bean_account) or ""
+            bean_account_name = bean_account.split(":")[-1] if bean_account else ""
 
             key_dict = {
                 "date": date_str,
@@ -442,6 +448,9 @@ async def reconcile(body: dict[str, Any]):
                 "description": narration,
                 "category": "",
                 "external_id": str(ext_id) if ext_id else "",
+                "type": bean_type,
+                "account_name": bean_account_name,
+                "bean_account": bean_account,
             }
 
             if ext_id:
@@ -608,12 +617,17 @@ async def export_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Date", "Payee", "PG Amount", "Bean Amount", "Diff", "Status"])
+    writer.writerow(["Type", "Account", "Date", "Payee", "Description", "Category", "External ID", "PG Amount", "Bean Amount", "Diff", "Status"])
     for r in result["results"]:
         key = r["key"]
         writer.writerow([
+            key.get("type", ""),
+            key.get("account_name", ""),
             key.get("date", ""),
             key.get("payee", ""),
+            key.get("description", ""),
+            key.get("category", ""),
+            key.get("external_id", ""),
             r["pg_amount"] or "",
             r["bean_amount"] or "",
             r["diff"],
