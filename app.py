@@ -158,17 +158,23 @@ def get_bean_conn():
 
 
 def _build_where(conditions: dict) -> tuple[str, list]:
-    """Build 'col1 = %s AND col2 = %s' + params list. Keys must be in WHERE_COLUMNS."""
+    """Build 'col1 = %s AND col2 = %s' + params list. Keys must be in WHERE_COLUMNS.
+
+    Empty/falsy values are skipped so that e.g. account_name='' means 'no filter'
+    rather than 'match empty string'. Returns '1=1' when no conditions remain.
+    """
     invalid = set(conditions.keys()) - WHERE_COLUMNS
     if invalid:
         raise ValueError(f"Invalid WHERE columns: {invalid}")
-    if not conditions:
-        raise ValueError("WHERE clause cannot be empty")
     parts = []
     params = []
     for col, val in conditions.items():
+        if val in (None, "", []):
+            continue  # treat empty as no-filter
         parts.append(f"{col} = %s")
         params.append(val)
+    if not parts:
+        return "1=1", []
     return " AND ".join(parts), params
 
 
@@ -308,23 +314,41 @@ async def get_accounts():
 async def reconcile(body: dict[str, Any]):
     date_from = body.get("date_from", "2025-01-01")
     date_to = body.get("date_to", "2025-01-31")
-    pg_account = body.get("pg_account", "BarclaysPersonal")
+    pg_account = body.get("pg_account", "") or ""
     columns = body.get("columns", ["date", "payee", "amount"])
     group_by = body.get("group_by", "date,payee")
     # Tolerance for amount matching (in currency units). Default 0.01 flags
     # anything beyond a single cent as a mismatch between PG and Beancount.
     tolerance = Decimal(str(body.get("tolerance", "0.01")))
 
-    # Guard against frontend race condition sending placeholder values
-    if pg_account in ("Loading...", "No accounts found", ""):
+    # Guard against frontend race condition sending placeholder values.
+    # Empty string is allowed and means 'no account filter' (All accounts).
+    if pg_account in ("Loading...", "No accounts found"):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
-    account_type = body.get("account_type") or None  # optional — sent by frontend when known
+    account_type = body.get("account_type") or None  # optional — empty/missing = no filter
     if account_type and account_type not in VALID_ACCOUNT_TYPES:
         return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
-    bean_account_regex, sign_mult, map_warning = resolve_mapping(pg_account, account_type)
-    if bean_account_regex is None:
-        return {"error": map_warning or f"No mapping for PG account: {pg_account}"}
+
+    # Build beancount regex from (account_name, account_type), treating empty as wildcard.
+    # ALWAYS keep the (Assets|Liabilities) prefix — prevents double-counting against
+    # Expenses/Income legs.
+    if pg_account and account_type:
+        bean_account_regex = f"(Assets|Liabilities):{re.escape(account_type)}:{re.escape(pg_account)}"
+        sign_mult = _sign_for_type(account_type)
+        map_warning = None
+    elif pg_account and not account_type:
+        bean_account_regex = f"(Assets|Liabilities):.*:{re.escape(pg_account)}"
+        sign_mult = 1
+        map_warning = "wildcard type — sign multiplier forced to +1 (no flip for CreditCard)"
+    elif not pg_account and account_type:
+        bean_account_regex = f"(Assets|Liabilities):{re.escape(account_type)}:.*"
+        sign_mult = _sign_for_type(account_type)
+        map_warning = None
+    else:
+        bean_account_regex = r"(Assets|Liabilities):.*"
+        sign_mult = 1
+        map_warning = "wildcard account+type — reconciling ALL balance-sheet accounts; sign multiplier forced to +1"
 
     # Column mappings
     col_map = {"date": "transaction_date", "account": "account_name", "amount": "amount",
@@ -341,15 +365,16 @@ async def reconcile(body: dict[str, Any]):
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
-        where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
-        params = [pg_account, date_from, date_to]
+        # Build WHERE clause with optional account_name and account_type filters
+        conditions = ["transaction_date >= %s", "transaction_date < %s"]
+        params = [date_from, date_to]
+        if pg_account:
+            conditions.append("account_name = %s")
+            params.append(pg_account)
         if account_type:
-            where_clause += " AND type = %s"
+            conditions.append("type = %s")
             params.append(account_type)
-        else:
-            clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
-            where_clause += f" AND type IN ({clean_placeholders})"
-            params.extend(sorted(VALID_ACCOUNT_TYPES))
+        where_clause = " AND ".join(conditions)
         query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
@@ -682,34 +707,50 @@ async def import_bean_only(body: dict[str, Any]):
 
 @app.get("/api/debug")
 async def debug_endpoint(
-    account_name: str = Query("BarclaysPersonal"),
+    account_name: str = Query(""),
     account_type: str | None = Query(None),
     date_from: str = Query("2025-01-01"),
     date_to: str = Query("2025-01-31"),
 ):
-    account_type = account_type or None
+    account_type = account_type or None  # empty/missing = no filter
 
-    if account_name in ("Loading...", "No accounts found", ""):
+    if account_name in ("Loading...", "No accounts found"):
         return {"error": "Invalid account selection. Please wait for accounts to load and select a valid PG account."}
 
     if account_type and account_type not in VALID_ACCOUNT_TYPES:
         return {"error": f"Invalid account_type '{account_type}'. Must be one of {VALID_ACCOUNT_TYPES}"}
 
-    bean_account_regex, sign_mult, map_warning = resolve_mapping(account_name, account_type)
-    if bean_account_regex is None:
-        return {"error": map_warning or f"No mapping for PG account: {account_name}"}
+    # Build beancount regex from (account_name, account_type), treating empty as wildcard.
+    # ALWAYS keep the (Assets|Liabilities) prefix — prevents double-counting.
+    if account_name and account_type:
+        bean_account_regex = f"(Assets|Liabilities):{re.escape(account_type)}:{re.escape(account_name)}"
+        sign_mult = _sign_for_type(account_type)
+        map_warning = None
+    elif account_name and not account_type:
+        bean_account_regex = f"(Assets|Liabilities):.*:{re.escape(account_name)}"
+        sign_mult = 1
+        map_warning = "wildcard type — sign multiplier forced to +1 (no flip for CreditCard)"
+    elif not account_name and account_type:
+        bean_account_regex = f"(Assets|Liabilities):{re.escape(account_type)}:.*"
+        sign_mult = _sign_for_type(account_type)
+        map_warning = None
+    else:
+        bean_account_regex = r"(Assets|Liabilities):.*"
+        sign_mult = 1
+        map_warning = "wildcard account+type — reconciling ALL balance-sheet accounts; sign multiplier forced to +1"
 
     pg_rows = []
     pg_error = None
-    where_clause = "account_name = %s AND transaction_date >= %s AND transaction_date < %s"
-    params = [account_name, date_from, date_to]
+    # Build WHERE clause with optional account_name and account_type filters
+    conditions = ["transaction_date >= %s", "transaction_date < %s"]
+    params = [date_from, date_to]
+    if account_name:
+        conditions.append("account_name = %s")
+        params.append(account_name)
     if account_type:
-        where_clause += " AND type = %s"
+        conditions.append("type = %s")
         params.append(account_type)
-    else:
-        clean_placeholders = ", ".join(["%s"] * len(VALID_ACCOUNT_TYPES))
-        where_clause += f" AND type IN ({clean_placeholders})"
-        params.extend(sorted(VALID_ACCOUNT_TYPES))
+    where_clause = " AND ".join(conditions)
     query = f"""
             SELECT external_id, transaction_date, payee, description, category,
                    amount, 1 as tx_count
