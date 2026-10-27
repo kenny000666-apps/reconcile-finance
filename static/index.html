@@ -193,7 +193,7 @@
   </div>
   <div class="control-group form-group">
     <label for="account-type">Account Type:</label>
-    <select id="account-type" class="form-select">
+    <select id="account-type" class="form-select" onchange="onTypeChange()">
       <option value="">All types</option>
     </select>
   </div>
@@ -330,10 +330,12 @@ let accountTypeMap = {};
 function saveFormState() {
   try {
     const columns = Array.from(document.querySelectorAll('.checkbox-group input:checked')).map(cb => cb.value);
+    const typeEl = document.getElementById('account-type');
     const state = {
       dateFrom: document.getElementById('dateFrom').value,
       dateTo: document.getElementById('dateTo').value,
       accountName: document.getElementById('account-name').value,
+      accountType: typeEl ? typeEl.value : '',
       tolerance: document.getElementById('tolerance').value,
       columns: columns,
       statusFilter: document.getElementById('statusFilter').value,
@@ -365,7 +367,15 @@ function restoreFormState() {
     if (state.statusFilter) {
       document.getElementById('statusFilter').value = state.statusFilter;
     }
+    // Auto-fill type from account first, then override with saved manual choice
     onAccountChange();
+    if (state.accountType !== undefined) {
+      const typeEl = document.getElementById('account-type');
+      if (typeEl && Array.from(typeEl.options).some(o => o.value === state.accountType)) {
+        typeEl.value = state.accountType;
+        updateSelectionDisplay();
+      }
+    }
   } catch(e) {}
 }
 
@@ -496,9 +506,18 @@ async function loadAccounts() {
 
 function getSelectedAccountType() {
   const sel = document.getElementById('account-type');
-  if (sel && sel.value) return sel.value;
-  const name = getSelectedAccountName();
-  return accountTypeMap[name] || null;
+  if (!sel) return '';
+  // Return the dropdown's current value directly. Empty string = "All types" (wildcard).
+  // Do NOT fall back to accountTypeMap — that would override the user's manual selection.
+  return sel.value;
+}
+
+function onTypeChange() {
+  // User manually changed type — update display, save state, and trigger re-query.
+  // Do NOT auto-reset the type back to the account's default.
+  updateSelectionDisplay();
+  saveFormState();
+  runReconcile();
 }
 
 function getSelectedAccountName() {
@@ -508,7 +527,8 @@ function getSelectedAccountName() {
 
 async function runReconcile() {
   const accountName = getSelectedAccountName();
-  if (!accountName || accountName === 'Loading...' || accountName.startsWith('No accounts')) {
+  // Allow empty accountName ("All accounts" wildcard). Reject only placeholder values.
+  if (accountName === 'Loading...' || accountName.startsWith('No accounts')) {
     document.getElementById('errorBox').textContent = 'Please wait for accounts to load, then select a valid account.';
     document.getElementById('errorBox').style.display = 'block';
     return;
@@ -524,12 +544,12 @@ async function runReconcile() {
   const params = {
     date_from: document.getElementById('dateFrom').value,
     date_to: document.getElementById('dateTo').value,
-    pg_account: accountName,
+    pg_account: accountName,         // '' = All accounts (wildcard)
+    account_type: accountType,       // '' = All types (wildcard)
     tolerance: parseFloat(document.getElementById('tolerance').value),
     columns: columns,
     group_by: columns.join(','),
   };
-  if (accountType) params.account_type = accountType;
   lastParams = params;
 
   try {
