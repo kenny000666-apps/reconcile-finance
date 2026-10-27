@@ -220,8 +220,8 @@
 </div>
 
 <div id="selectionBadge" style="margin-bottom: 15px; font-size: 13px; color: #555; background: #fff; padding: 10px 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
-  <span><strong>Selected Account:</strong> <span id="displayAccountName" style="color:#1a73e8; font-weight:600;">(none)</span></span>
-  <span><strong>Selected Type:</strong> <span id="displayAccountType" style="color:#6f42c1; font-weight:600;">All Types</span></span>
+  <span><strong>Selected Account:</strong> <span id="displayAccountName" style="color:#1a73e8; font-weight:600;">All accounts</span></span>
+  <span><strong>Selected Type:</strong> <span id="displayAccountType" style="color:#6f42c1; font-weight:600;">All types</span></span>
 </div>
 
 <div id="errorBox" class="error" style="display:none"></div>
@@ -401,12 +401,18 @@ function attachFormListeners() {
 function updateSelectionDisplay() {
   const nameSel = document.getElementById('account-name');
   const typeEl = document.getElementById('account-type');
-  const nameVal = nameSel && nameSel.value ? nameSel.value : '(none)';
-  const typeVal = typeEl && typeEl.value ? typeEl.value : (accountTypeMap[nameVal] || '—');
+  // Read the dropdown values DIRECTLY. An empty value is a wildcard, not a
+  // fallback trigger: empty type means "All types", empty account means
+  // "All accounts". Never fall back to accountTypeMap here — that would
+  // keep showing the previous/derived type when the user picks the wildcard.
+  const acctVal = nameSel ? nameSel.value : '';
+  const acctLabel = acctVal === '' ? 'All accounts' : acctVal;
+  const typeVal = typeEl ? typeEl.value : '';
+  const typeLabel = typeVal === '' ? 'All types' : typeVal;
   const dispName = document.getElementById('displayAccountName');
   const dispType = document.getElementById('displayAccountType');
-  if (dispName) dispName.textContent = nameVal;
-  if (dispType) dispType.textContent = typeVal || '—';
+  if (dispName) dispName.textContent = acctLabel;
+  if (dispType) dispType.textContent = typeLabel;
 }
 
 function onAccountChange() {
