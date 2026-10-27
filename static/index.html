@@ -1006,18 +1006,28 @@ function showView(view) {
   document.getElementById('view-advanced').classList.toggle('hidden', !isAdv);
 
   if (isAdv) {
-    initAdvFormIfEmpty();
-    loadUpdateHistory();
+    try {
+      initAdvFormIfEmpty();
+    } catch (e) {
+      console.error('initAdvFormIfEmpty failed:', e);
+    }
+    try {
+      loadUpdateHistory();
+    } catch (e) {
+      console.error('loadUpdateHistory failed:', e);
+      const wrap = document.getElementById('advHistoryTableWrap');
+      if (wrap) wrap.innerHTML = '<div class="error">Failed to load update history: ' + escapeHtml(e.message) + '</div>';
+    }
   }
 }
 
 function initAdvFormIfEmpty() {
   const setContainer = document.getElementById('advSetRows');
-  if (setContainer.children.length === 0) {
+  if (setContainer && setContainer.children.length === 0) {
     addSetRow();
   }
   const whereContainer = document.getElementById('advWhereRows');
-  if (whereContainer.children.length === 0) {
+  if (whereContainer && whereContainer.children.length === 0) {
     addWhereRow();
   }
 }
@@ -1292,19 +1302,23 @@ function formatClauseSummary(clause) {
 
 async function loadUpdateHistory() {
   const wrap = document.getElementById('advHistoryTableWrap');
+  if (!wrap) {
+    console.error('loadUpdateHistory: #advHistoryTableWrap not found');
+    return;
+  }
   wrap.innerHTML = '<div class="loading">Loading history...</div>';
 
   try {
     const resp = await fetch('/api/admin/updates/history');
     const data = await resp.json();
     if (!resp.ok) {
-      const msg = data.detail || data.error || 'Failed to load history';
+      const msg = data.detail || data.error || 'Failed to load update history';
       wrap.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
       return;
     }
 
     if (!Array.isArray(data) || data.length === 0) {
-      wrap.innerHTML = '<div style="padding:20px; text-align:center; color:#666;">No update history found.</div>';
+      wrap.innerHTML = '<div style="padding:20px; text-align:center; color:#666;">No update history recorded yet.</div>';
       return;
     }
 
@@ -1313,33 +1327,39 @@ async function loadUpdateHistory() {
     html += '</tr></thead><tbody>';
 
     data.forEach(item => {
-      const isRolledBack = Boolean(item.rolled_back_at);
-      const rolledBackText = isRolledBack ? `Yes (${item.rolled_back_at})` : 'No';
-      const setSum = formatClauseSummary(item.set_clause);
-      const whereSum = formatClauseSummary(item.where_clause);
+      try {
+        const id = item.id ?? '';
+        const isRolledBack = Boolean(item.rolled_back_at);
+        const rolledBackText = isRolledBack ? `Yes (${item.rolled_back_at || ''})` : 'No';
+        const setSum = formatClauseSummary(item.set_clause);
+        const whereSum = formatClauseSummary(item.where_clause);
 
-      html += '<tr>';
-      html += `<td>${item.id}</td>`;
-      html += `<td style="white-space:nowrap;">${escapeHtml(item.executed_at || '')}</td>`;
-      html += `<td>${escapeHtml(item.source || '')}</td>`;
-      html += `<td>${escapeHtml(item.description || '')}</td>`;
-      html += `<td><code>${escapeHtml(setSum)}</code></td>`;
-      html += `<td><code>${escapeHtml(whereSum)}</code></td>`;
-      html += `<td>${item.rows_affected}</td>`;
-      html += `<td>${escapeHtml(rolledBackText)}</td>`;
-      html += `<td style="white-space:nowrap;">`;
-      html += `<button class="adv-detail-btn" onclick="openAdvDetailsModal(${item.id})">Details</button> `;
-      if (!isRolledBack) {
-        html += `<button class="adv-rollback-btn" onclick="advRollback(${item.id})">Rollback</button>`;
+        html += '<tr>';
+        html += `<td>${escapeHtml(String(id))}</td>`;
+        html += `<td style="white-space:nowrap;">${escapeHtml(item.executed_at || '')}</td>`;
+        html += `<td>${escapeHtml(item.source || '')}</td>`;
+        html += `<td>${escapeHtml(item.description || '')}</td>`;
+        html += `<td><code>${escapeHtml(setSum)}</code></td>`;
+        html += `<td><code>${escapeHtml(whereSum)}</code></td>`;
+        html += `<td>${escapeHtml(String(item.rows_affected ?? ''))}</td>`;
+        html += `<td>${escapeHtml(rolledBackText)}</td>`;
+        html += `<td style="white-space:nowrap;">`;
+        html += `<button class="adv-detail-btn" onclick="openAdvDetailsModal(${JSON.stringify(id)})">Details</button> `;
+        if (!isRolledBack) {
+          html += `<button class="adv-rollback-btn" onclick="advRollback(${JSON.stringify(id)})">Rollback</button>`;
+        }
+        html += `</td>`;
+        html += '</tr>';
+      } catch (rowErr) {
+        console.error('Failed to render history row:', rowErr, item);
+        html += `<tr><td colspan="9" style="color:#d32f2f;">Error rendering row: ${escapeHtml(rowErr.message)}</td></tr>`;
       }
-      html += `</td>`;
-      html += '</tr>';
     });
 
     html += '</tbody></table>';
     wrap.innerHTML = html;
   } catch (e) {
-    wrap.innerHTML = `<div class="error">Failed to load history: ${escapeHtml(e.message)}</div>`;
+    wrap.innerHTML = `<div class="error">Failed to load update history: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -1438,6 +1458,6 @@ async function advRollback(id) {
 
 
 </script>
-<div style="position:fixed;bottom:8px;right:12px;font-size:11px;color:#888;z-index:100;">v0.4.2-dev</div>
+<div style="position:fixed;bottom:8px;right:12px;font-size:11px;color:#888;z-index:100;">v0.4.6</div>
 </body>
 </html>
