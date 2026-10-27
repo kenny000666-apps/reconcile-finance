@@ -208,6 +208,7 @@
       <label><input type="checkbox" value="account_name" checked> Account</label>
       <label><input type="checkbox" value="date" checked> Date</label>
       <label><input type="checkbox" value="payee" checked> Payee</label>
+      <label><input type="checkbox" value="description" checked> Description</label>
       <label><input type="checkbox" value="amount" checked> Amount</label>
       <label><input type="checkbox" value="category"> Category</label>
       <label><input type="checkbox" value="external_id"> Ext ID</label>
@@ -615,9 +616,9 @@ function renderTable(results, data) {
     return;
   }
 
-  const selectedCols = lastParams ? lastParams.columns : ['date','payee','amount'];
+  const selectedCols = lastParams ? lastParams.columns : ['date','payee','description','amount'];
   // Always ensure these key fields are displayed for context, even if not in user-selected cols.
-  const alwaysCols = ['type', 'account_name'];
+  const alwaysCols = ['type', 'account_name', 'description'];
   // Build final column list: alwaysCols first (deduped), then user-selected cols (minus amount, minus dupes).
   const seen = new Set();
   const cols = [];
@@ -672,7 +673,11 @@ function renderTable(results, data) {
       }
     }
     for (const c of cols) {
-      const val = k[c] || k.narration || '';
+      let val = k[c];
+      if ((val === undefined || val === null || val === '') && c === 'description') {
+        val = k.narration || '';
+      }
+      val = val || '';
       if (c === 'type') {
         tableHtml += `<td>${typeBadge(val)}</td>`;
       } else {
@@ -723,6 +728,8 @@ function renderTable(results, data) {
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Difference</span><span class="m-detail-value ${diffClass}">${diffVal}</span></div>`;
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">PG Count</span><span class="m-detail-value">${r.pg_count}</span></div>`;
     cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Bean Count</span><span class="m-detail-value">${r.bean_count}</span></div>`;
+    const descVal = k.description || k.narration || '';
+    if (descVal) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Description</span><span class="m-detail-value">${descVal}</span></div>`;
     if (k.category) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">Category</span><span class="m-detail-value">${k.category}</span></div>`;
     if (k.external_id) cardsHtml += `<div class="m-detail-row"><span class="m-detail-label">External ID</span><span class="m-detail-value">${k.external_id}</span></div>`;
     cardsHtml += `</div>`;
@@ -1458,6 +1465,6 @@ async function advRollback(id) {
 
 
 </script>
-<div style="position:fixed;bottom:8px;right:12px;font-size:11px;color:#888;z-index:100;">v0.4.6</div>
+<div style="position:fixed;bottom:8px;right:12px;font-size:11px;color:#888;z-index:100;">v0.4.7</div>
 </body>
 </html>
